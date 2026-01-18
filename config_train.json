@@ -1,0 +1,12 @@
+{
+"sessions":[
+	{"position": "./data/tracking/Seq21_tracking.pickle",
+   	"annotation": "./data/annotation/Seq21_annotation.xlsx",
+   	"mask": "./data/holds/"},
+	{"position": "./data/tracking/Seq22_tracking.pickle",
+   	"annotation": "./data/annotation/Seq22_annotation.xlsx",
+   	"mask": "./data/holds/"}
+	],
+"dataset": "./data/dataset.pickle",
+"network": "./data/u_net.pt"
+}

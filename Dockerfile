@@ -17,7 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy and install Python dependencies
 COPY requirements.txt .
+
+# Set temp directory on a bigger partition
+ENV TMPDIR=/home/merry251/docker_tracking/tmp
+RUN mkdir -p $TMPDIR
 RUN pip install --no-cache-dir -r requirements.txt
+
+#RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy YOLO model and code
 COPY yolov8x-pose.pt /app/yolov8x-pose.pt
@@ -46,7 +52,30 @@ ENV MEDIAPIPE_MODEL_DIR=/app/.mediapipe
 
 # Preload Mediapipe Pose as appuser (downloads cached in /app/.mediapipe)
 RUN python3 -c "from ultralytics import YOLO; model = YOLO('yolov8x-pose.pt')"
-RUN python3 -c "import mediapipe as mp; mp.solutions.pose.Pose(static_image_mode=True)"
+#RUN python3 -c "import mediapipe as mp; mp.solutions.pose.Pose(static_image_mode=True)"
+#RUN python3 -c "from mediapipe.python import solutions as mp_solutions; mp_solutions.pose.Pose(static_image_mode=True)"
+RUN python3 - <<'EOF'
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.vision import RunningMode
+
+BaseOptions = python.BaseOptions
+PoseLandmarker = python.vision.PoseLandmarker
+PoseLandmarkerOptions = python.vision.PoseLandmarkerOptions
+
+options = PoseLandmarkerOptions(
+    base_options=BaseOptions(
+        model_asset_path="/app/.mediapipe/pose_landmarker_lite.task"
+    ),
+    running_mode=RunningMode.IMAGE
+)
+
+with PoseLandmarker.create_from_options(options) as landmarker:
+    print("✅ Mediapipe PoseLandmarker ready (Python 3.11)")
+EOF
+
+
+
 
 # Command to run Streamlit
 CMD ["streamlit", "run", "scripts/main.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

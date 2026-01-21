@@ -126,15 +126,17 @@ with col_yolo:
                                 t = s.get("title","")
                                 st.write(f"Processing: {t}")
                                 if not os.path.isfile(s.get("tracking_yolo","")):
-                                    detections, people = yolo_tracking(
-                                        s.get("video", ""),
-                                        s.get("tracking_yolo", ""),
-                                        title=s.get("title",""),
-                                        out_image_name=s.get("image_tracking", ""),
+                                    detections, people, heatmap_acc = yolo_tracking(
+                                        st.session_state.video,
+                                        st.session_state.tracking_yolo,
+                                        title=st.session_state.title,
+                                        out_image_name=st.session_state.image_tracking,
+                                        heatmap_image_name=st.session_state.heatmap_tracking,
                                         model_name='yolov8x-pose.pt',
                                         display=False,
                                         stream=True
                                     )
+
                         st.success("YOLO on all sessions complete.")
                         
 
@@ -152,50 +154,74 @@ with col_yolo:
             st.session_state[key] = value
         st.success("Fields cleared.")
 
-
-
-    # ---------------- YOLO FORM ----------------
+# ---------------- YOLO FORM ----------------
+with col_yolo:
     placeholder_yolo_user_form = st.empty()
-
     with placeholder_yolo_user_form:
         with st.form("yolo_form"):
             st.text_input("Title", key="title")
             st.text_input("Video IN", key="video")
             st.text_input("YOLO Tracking OUT", key="tracking_yolo")
             st.text_input("Tracking Image OUT", key="image_tracking")
+            st.text_input("Heatmap Image OUT", key="heatmap_tracking", value="./data/tracking/heatmap.png")
             submitted_yolo = st.form_submit_button("Run YOLO Tracking")
 
     if submitted_yolo:
-        if 1:#        with placeholders["status_yolo"]:
-            with st.spinner("Running YOLO tracking..."):
-                if not os.path.isfile(st.session_state.tracking_yolo):
-                    detections, people = yolo_tracking(
-                        st.session_state.video,
-                        st.session_state.tracking_yolo,
-                        title=st.session_state.title,
-                        out_image_name=st.session_state.image_tracking,
-                        model_name='yolov8x-pose.pt',
-                        display=False,
-                        stream=True
-                    )
+        with st.spinner("Running YOLO tracking..."):
+            # Vérifier si le pickle existe
+            if not os.path.isfile(st.session_state.tracking_yolo):
+                # Appel de yolo_tracking avec la nouvelle signature
+                detections, people, heatmap_acc = yolo_tracking(
+                    st.session_state.video,
+                    st.session_state.tracking_yolo,
+                    title=st.session_state.title,
+                    out_image_name=st.session_state.image_tracking,
+                    heatmap_image_name=st.session_state.heatmap_tracking,
+                    model_name='yolov8x-pose.pt',
+                    display=False,
+                    stream=True
+                )
+            else:
+                # Charger les données existantes
+                with open(st.session_state.tracking_yolo, "rb") as f:
+                    data = pickle.load(f)
+                detections = data["list_detection"]
+                people = data["tracking_person"]
+                if os.path.isfile(st.session_state.heatmap_tracking):
+                    heatmap_acc = cv2.imread(st.session_state.heatmap_tracking, cv2.IMREAD_UNCHANGED)
                 else:
-                    with open(st.session_state.tracking_yolo, "rb") as f:
-                        data = pickle.load(f)
-                    detections = data["list_detection"]
-                    people = data["tracking_person"]
+                    heatmap_acc = None
 
-                st.session_state.list_climbers_tracking = ",".join(map(str, people))
-                st.success("YOLO complete.")
+            st.session_state.list_climbers_tracking = ",".join(map(str, people))
+            st.success("YOLO complete.")
 
+    # ---------------- Preview YOLO Image & Heatmap ----------------
     placeholder_yolo_image = st.empty()
+    with placeholder_yolo_image.container():  # garde tout dans col_yolo
+        # Image tracking
+        image_width = 400  # largeur en pixels, ajuste comme tu veux
 
-    # Preview YOLO image
-    if os.path.isfile(st.session_state.image_tracking):
-        placeholder_yolo_image.image(
-            st.session_state.image_tracking,
-            caption=f"Tracking Image: {st.session_state.title}",
-            width="stretch",
-        )
+        # Image tracking
+        if os.path.isfile(st.session_state.image_tracking):
+            img_tracking = cv2.imread(st.session_state.image_tracking)
+            img_tracking_rgb = cv2.cvtColor(img_tracking, cv2.COLOR_BGR2RGB)
+            st.image(
+                img_tracking_rgb,
+                caption=f"Tracking Image: {st.session_state.title}",
+                width=image_width
+            )
+
+        # Heatmap
+        if st.session_state.get("heatmap_tracking") and os.path.isfile(st.session_state.heatmap_tracking):
+            heatmap_img = cv2.imread(st.session_state.heatmap_tracking)
+            heatmap_rgb = cv2.cvtColor(heatmap_img, cv2.COLOR_BGR2RGB)
+            st.image(
+                heatmap_rgb,
+                caption="Accumulated Heatmap",
+                width=image_width
+            )
+
+
 
 # --------------------------------------------------
 # MEDIAPIPE COLUMN

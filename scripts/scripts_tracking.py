@@ -13,7 +13,7 @@ import streamlit as st
 import os
 import subprocess
 
-
+'''
 def yolo_tracking(video_file, tracking_yolo, title= None, out_image_name=None, model_name = 'yolov8l.pt', display = True, stream=True):
     cap = cv2.VideoCapture(video_file)
     if cap.isOpened() == False:
@@ -118,6 +118,154 @@ def yolo_tracking(video_file, tracking_yolo, title= None, out_image_name=None, m
             pickle.dump({'list_detection': list_detection, 'tracking_person':[tracking_person2]}, handle)
     return list_detection, [tracking_person2]
     
+    '''
+
+
+
+
+def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_name=None, model_name='yolov8l.pt', title=None, display=True, stream=True):
+    cap = cv2.VideoCapture(video_file)
+    if not cap.isOpened():
+        st.write("Error opening video stream or file")
+        raise TypeError
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+
+    st.write("Video frame size:", frame_width, frame_height)
+    st.write("Video duration:", length, "frames")
+
+    model = YOLO(model_name)
+    st.write(f"Device to run the model: {model.device}") 
+
+    results = model.track(source=video_file, classes=[0], show=False, verbose=False, stream=stream)
+    list_detection = []
+    bar_yolo = st.progress(0., text="Tracking progress")
+
+    # --- MATRICE TAMPON POUR LA HEATMAP ---
+    heatmap_acc = np.zeros((frame_height, frame_width), dtype=np.float32)
+
+    for i, r in enumerate(results):
+        bar_yolo.progress(i / length, text="Tracking progress")
+
+        try:
+            rb = r.boxes.xyxy.cpu().numpy()
+            rid = r.boxes.id.int().cpu().tolist()
+            rt = (i / fps) * 1000
+            kp = r.keypoints.cpu().numpy()
+            list_detection.append({'timestamp': rt, 'boxes': rb, 'id': rid, 'keypoints': kp})
+
+            # --- INCREMENTATION DU TAMPON ---
+            for j, id_val in enumerate(rid):
+                x_center = int((rb[j, 0] + rb[j, 2]) / 2)
+                y_center = int((rb[j, 1] + rb[j, 3]) / 2)
+                if 0 <= x_center < frame_width and 0 <= y_center < frame_height:
+                    heatmap_acc[y_center, x_center] += 1  # incrémente de 1
+
+        except:
+            pass
+    bar_yolo.empty()
+
+    # --- TRACKING EXISTANT PAR PERSONNE ---
+    l3 = []
+    for l in list_detection:
+        for l2 in l['id']:
+            l3.append(l2)
+
+    if display:
+        fig, ax = plt.subplots()
+        m = 0
+        tracking_person2 = -1
+        for idx in set(l3):
+            tracking_person = idx
+            lx, ly, lt = [], [], []
+            for l in list_detection:
+                b = l['boxes']
+                i = l['id']
+                t = l['timestamp']
+                if tracking_person in i:
+                    id_box = i.index(tracking_person)
+                    lx.append((b[id_box,0]+b[id_box,2])/2)
+                    ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
+                    lt.append(t)
+            if len(lx) > 100:
+                ax.plot(lx, ly, label=str(idx))
+                if max(ly) > m:
+                    m = max(ly)
+                    tracking_person2 = tracking_person
+        ax.legend()
+        st.pyplot(fig)
+        if out_image_name:
+            os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
+            plt.savefig(out_image_name)
+    else:
+        myfig = plt.figure()
+        m = 0
+        tracking_person2 = -1
+        for idx in set(l3):
+            tracking_person = idx
+            lx, ly, lt = [], [], []
+            for l in list_detection:
+                b = l['boxes']
+                i = l['id']
+                t = l['timestamp']
+                if tracking_person in i:
+                    id_box = i.index(tracking_person)
+                    lx.append((b[id_box,0]+b[id_box,2])/2)
+                    ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
+                    lt.append(t)
+            if len(lx) > 100:
+                plt.plot(lx, ly, label=str(idx))
+                if max(ly) > m:
+                    m = max(ly)
+                    tracking_person2 = tracking_person
+        plt.legend()
+        plt.title((title or "") + " tracking climber:" + str(tracking_person2))
+        if out_image_name:
+            os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
+            plt.savefig(out_image_name)
+        plt.close(myfig)
+
+    # --- CREATION DE LA HEATMAP ---
+    if heatmap_image_name is not None:
+        folder = os.path.dirname(heatmap_image_name)
+        if folder != '':
+            os.makedirs(folder, exist_ok=True)
+
+        print("Heatmap min/max avant normalisation:", heatmap_acc.min(), heatmap_acc.max())
+
+        # --- Lissage pour obtenir un effet "traînée"
+        heatmap_blur = cv2.GaussianBlur(heatmap_acc, (25, 25), 0)  # ajuster le kernel pour la douceur
+
+        # Normalisation 0-255
+        heatmap_norm = cv2.normalize(heatmap_blur, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # Appliquer colormap (JET) pour bleu->rouge
+        heatmap_color = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
+
+        # Pixels à 0 deviennent blanc
+        mask_zero = heatmap_norm == 0
+        heatmap_color[mask_zero] = [255, 255, 255]  # BGR
+
+        # Sauvegarde
+        cv2.imwrite(heatmap_image_name, heatmap_color)
+        st.write(f"Heatmap saved at {heatmap_image_name}")
+
+        # Affichage Streamlit
+        if display:
+            st.image(cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB), caption="Trail Heatmap", width=700)
+
+    # --- SAUVEGARDE PICKLE ---
+    os.makedirs(os.path.dirname(tracking_yolo), exist_ok=True)
+    with open(tracking_yolo, 'wb') as handle:
+        pickle.dump({'list_detection': list_detection, 'tracking_person':[tracking_person2]}, handle)
+
+    return list_detection, [tracking_person2], heatmap_acc
+
+
+
     
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:

@@ -12,7 +12,9 @@ from ultralytics import YOLO
 import streamlit as st
 import os
 import subprocess
-
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 '''
 def yolo_tracking(video_file, tracking_yolo, title= None, out_image_name=None, model_name = 'yolov8l.pt', display = True, stream=True):
     cap = cv2.VideoCapture(video_file)
@@ -266,7 +268,7 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
 
 
 
-    
+'''    
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:
         track_yolo = pickle.load(o)
@@ -320,7 +322,242 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
             pickle.dump(list_pose, handle)
     bar_mediapipe.empty()
     return
-    
+'''
+
+'''
+def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
+
+    with open(tracking_yolo, 'rb') as o:
+        track_yolo = pickle.load(o)
+
+    list_detection = track_yolo['list_detection']
+    list_tracking_person = track_yolo['tracking_person']
+
+    # ---- MediaPipe PoseLandmarker (NEW API) ----
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path="pose_landmarker_full.task"),
+        running_mode=vision.RunningMode.IMAGE,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.8
+    )
+
+
+    landmarker = PoseLandmarker.create_from_options(options)
+
+    list_pose = []
+    cap = cv2.VideoCapture(video_file)
+
+    if not cap.isOpened():
+        st.write("Error opening video stream or file")
+        raise TypeError
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
+    t_idx = 0
+    bar_mediapipe = st.progress(0., text="Tracking progress")
+
+    while cap.isOpened():
+        bar_mediapipe.progress(t_idx / total_frames, text="Tracking progress")
+
+        ret, image = cap.read()
+        if not ret:
+            break
+
+        if t_idx > len(list_detection) - 1:
+            break
+
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        for tracking_person in list_tracking_person:
+            if tracking_person in list_detection[t_idx]['id']:
+                i_idx = list_detection[t_idx]['id'].index(tracking_person)
+                b = list_detection[t_idx]['boxes'][i_idx, :]
+
+                image_crop = image_rgb[
+                    int(b[1]):int(b[3]),
+                    int(b[0]):int(b[2])
+                ]
+
+                if image_crop.size == 0:
+                    break
+
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_crop)
+                result = landmarker.detect(mp_image)
+
+                if result.pose_landmarks:
+                    lrp = []
+                    for l in result.pose_landmarks[0]:
+                        lrp.append({
+                            'x': b[0] + (b[2] - b[0]) * l.x,
+                            'y': b[1] + (b[3] - b[1]) * l.y,
+                            'z': l.z,
+                            'visib': l.visibility
+                        })
+
+                    lrpw = []
+                    if result.pose_world_landmarks:
+                        for l in result.pose_world_landmarks[0]:
+                            lrpw.append({
+                                'x': l.x,
+                                'y': l.y,
+                                'z': l.z,
+                                'visib': l.visibility
+                            })
+
+                    list_pose.append({
+                        'timestamp': list_detection[t_idx]['timestamp'],
+                        'pose': lrp,
+                        'world pose': lrpw,
+                        'size': (width, height)
+                    })
+                break
+
+        t_idx += 1
+
+    cap.release()
+    landmarker.close()
+
+    # ---- Save tracking ----
+    os.makedirs(os.path.dirname(tracking_initial), exist_ok=True)
+    with open(tracking_initial, 'wb') as handle:
+        pickle.dump(list_pose, handle)
+
+    bar_mediapipe.empty()
+
+'''
+
+
+def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
+
+    # ---------- Load YOLO tracking ----------
+    with open(tracking_yolo, 'rb') as o:
+        track_yolo = pickle.load(o)
+
+    list_detection = track_yolo['list_detection']
+    list_tracking_person = track_yolo['tracking_person']
+
+    # ---------- MediaPipe PoseLandmarker ----------
+    MODEL_PATH = "/app/data/pose_landmarker_full.task"
+
+
+
+
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"MediaPipe model not found: {MODEL_PATH}")
+
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=vision.RunningMode.IMAGE,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.8
+    )
+
+    landmarker = PoseLandmarker.create_from_options(options)
+
+    # ---------- Video ----------
+    cap = cv2.VideoCapture(video_file)
+    if not cap.isOpened():
+        raise IOError("Error opening video")
+
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    list_pose = []
+    t_idx = 0
+    bar = st.progress(0., text="MediaPipe tracking")
+
+    # ---------- Main loop ----------
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret or t_idx >= len(list_detection):
+            break
+
+        bar.progress(t_idx / total_frames, text="MediaPipe tracking")
+
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+
+        result = landmarker.detect(mp_image)
+
+        if not result.pose_landmarks:
+            t_idx += 1
+            continue
+
+        # YOLO detections at this frame
+        det = list_detection[t_idx]
+
+        for pid in list_tracking_person:
+            if pid not in det['id']:
+                continue
+
+            i = det['id'].index(pid)
+            b = det['boxes'][i]  # [x1, y1, x2, y2]
+
+            # Try to find the pose inside this bbox
+            for k, pose_lms in enumerate(result.pose_landmarks):
+
+                # pelvis center (23,24)
+                cx = (pose_lms[23].x + pose_lms[24].x) * 0.5 * width
+                cy = (pose_lms[23].y + pose_lms[24].y) * 0.5 * height
+
+                if not (b[0] <= cx <= b[2] and b[1] <= cy <= b[3]):
+                    continue
+
+                # ---------- Store pose ----------
+                lrp = [{
+                    'x': l.x * width,
+                    'y': l.y * height,
+                    'z': l.z,
+                    'visib': l.visibility
+                } for l in pose_lms]
+
+                lrpw = []
+                if result.pose_world_landmarks:
+                    for l in result.pose_world_landmarks[k]:
+                        lrpw.append({
+                            'x': l.x,
+                            'y': l.y,
+                            'z': l.z,
+                            'visib': l.visibility
+                        })
+
+                list_pose.append({
+                    'timestamp': det['timestamp'],
+                    'pose': lrp,
+                    'world pose': lrpw,
+                    'size': (width, height)
+                })
+
+                break  # one pose per person
+            break      # one tracked person
+
+        t_idx += 1
+
+    cap.release()
+    landmarker.close()
+    bar.empty()
+
+    # ---------- Safety check ----------
+    if not list_pose:
+        raise ValueError(
+            "No pose detected. "
+            "Check YOLO boxes, MediaPipe model, or video quality."
+        )
+
+    # ---------- Save ----------
+    os.makedirs(os.path.dirname(tracking_initial), exist_ok=True)
+    with open(tracking_initial, 'wb') as handle:
+        pickle.dump(list_pose, handle)
+
+
+
+
 def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file, w_c, dx, dy):
     with open(tracking_initial,'rb') as o:
         list_pose = pickle.load(o)

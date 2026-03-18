@@ -1,8 +1,7 @@
-./data/annotation/
-./data/holds/
-./data/training/
-./data/videos/
-./myenv/
-./mediapipe_models/
-./__pycache__
+data/
+myenv/
+mediapipe_models/
 *.pt
+
+.README.txt.swp
+.ipynb_checkpoints/

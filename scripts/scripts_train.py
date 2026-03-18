@@ -277,7 +277,6 @@ def get_detection(sessions, dataset_out, u_net_file):
     y_score_true = []
 
     color = {'LH':'red','RH':'orange','LF':'blue','RF':'purple'}
-    print("File:",u_net_file)
     u_net = torch.jit.load(u_net_file)
     u_net.eval()
     bar_inference = st.progress(0., text="Inference progress")

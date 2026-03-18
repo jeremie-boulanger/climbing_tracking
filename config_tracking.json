@@ -1,0 +1,20 @@
+{
+	"session":[{
+    "title": "Seq21",
+    "video": "./data/videos/Seq21.mp4",
+    "tracking_yolo": "./data/tracking/Seq21_tracking_yolo.pickle",
+    "image_tracking": "./data/tracking/Seq21_tracking.png",
+    "tracking_mediapipe": "./data/tracking/Seq21_tracking_mediapipe.pickle",
+    "tracking_pickle": "./data/tracking/Seq21_tracking.pickle",
+    "tracking_xlsx": "./data/tracking/Seq21_tracking.xlsx",
+    "wall image": "./data/tracking/wall_image.png",
+    "video_tracking": "./data/tracking/Seq21_tracking.mp4",
+    "pixel size X (m/p)": 0.01,
+    "pixel size Y (m/p)": 0.01,
+    "frequency cut-off": 0.1,
+    "delta t": 0.02,
+    "name": "John Doe",
+    "age": 30,
+    "email": "john@example.com",
+    "option": "Option 2"}]
+}

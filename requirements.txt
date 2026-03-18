@@ -1,0 +1,12 @@
+streamlit
+numpy
+matplotlib
+opencv-python
+pandas
+openpyxl
+scipy
+scikit-learn
+torch
+mediapipe
+ultralytics
+lapx

@@ -1,4 +1,4 @@
-*.pyc
+scripts/__pycache__/
 data/
 *.pt
 myenv/

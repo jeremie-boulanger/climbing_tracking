@@ -54,22 +54,21 @@ def get_annotation(annotation_file,n,list_holds,time):
     #print('ta:',time_annotation[0])
     annotation_ts = {'LH':{}, 'RH':{}, 'LF':{}, 'RF':{}}
     for l in annotation_ts:
-        for h in list_holds:
-
+        for en,h in enumerate(list_holds):
             annotation_ts[l][h] = np.zeros(n) # changement 17/01
 
     for d in annotation.index:
         l = annotation["Member parts"][d]
-        if l != '' and annotation["Holds ID"][d] != "-1":
+        if l != '' and annotation["Holds ID"][d]>-1:
             #print('taa,d',annotation["Time"][d],d)
             i = np.argmin(np.abs(time-time_annotation[d]))
-            if annotation["Action"][d] == "A" and annotation["Holds ID"][d] != "0":
+            if annotation["Action"][d] == "A" and annotation["Holds ID"][d] != 0:
 #                print("d:",d,"l:",l,"hid:",annotation["Holds ID"][d])
 #                for w in annotation_ts[l]:
 #                    print("annot ts[l]:",w)
-                annotation_ts[l][annotation["Holds ID"][d]][i] = 1
-            if annotation["Action"][d] == "D" and annotation["Holds ID"][d] != "0":
-                annotation_ts[l][annotation["Holds ID"][d]][i] = -1
+                annotation_ts[l][int(annotation["Holds ID"][d])][i] = 1
+            if annotation["Action"][d] == "D" and annotation["Holds ID"][d] != 0:
+                annotation_ts[l][int(annotation["Holds ID"][d])][i] = -1
     for l in annotation_ts:
         for en,h in enumerate(list_holds):
 #            annotation_ts[l][en] = np.cumsum(annotation_ts[l][en]) # changement 16/01
@@ -128,7 +127,7 @@ def get_dataset(sessions, dataset_file):
             velo = np.concatenate((velo[0:1,:],velo))
             acc = np.diff(velo,axis=0)/dt
             acc = np.concatenate((acc[0:1,:],acc))
-            for l in mask_holds:
+            for en,l in enumerate(mask_holds):
                 dist = mask_holds[l][(p[:,1]/dx).astype(int),(p[:,0]/dy).astype(int)][:,np.newaxis]
 #                    dist = mask_holds[en][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis] # changement 16/01
 #                except IndexError:
@@ -142,7 +141,7 @@ def get_dataset(sessions, dataset_file):
     y = np.concatenate(y)
     os.makedirs(os.path.dirname(dataset_file), exist_ok=True)
     with open(dataset_file, 'wb') as handle:
-        pickle.dump({'x':x,'y':y}, handle)
+        pickle.dump({'x':x,'y':y}, handle, protocol=pickle.HIGHEST_PROTOCOL)
     return
     
 
@@ -205,7 +204,7 @@ def get_f1_score(u_net,list_file_pos,list_file_annotation,list_folder_holds):
         annotation = get_annotation(annotation_file,n,mask_holds,time)
         detection = get_detection(list_pos[i0],mask_holds,u_net)
         for l in annotation:
-            for h in mask_holds:
+            for en,h in enumerate(mask_holds):
                 a.append(annotation[l][h])
 
                 d.append(detection[l][h][:,0])
@@ -277,6 +276,7 @@ def get_detection(sessions, dataset_out, u_net_file):
     y_score_true = []
 
     color = {'LH':'red','RH':'orange','LF':'blue','RF':'purple'}
+    print("File:",u_net_file)
     u_net = torch.jit.load(u_net_file)
     u_net.eval()
     bar_inference = st.progress(0., text="Inference progress")
@@ -499,7 +499,7 @@ def remove_short_sequences(arr,min_length):
 def realize_detection(tresh_reach0,tresh_leave0,minimal_time0,lambda_velocity):
     global list_holds, pos_RH,pos_LH,pos_RF,pos_LF
     detection = {"RH":{},"LH":{},"RF":{},"LF":{}}
-    for l in list_holds:
+    for en,l in enumerate(list_holds):
         for p,tp in zip([pos_RH,pos_LH,pos_RF,pos_LF],["RH","LH","RF","LF"]):
             dist = np.linalg.norm(p-np.ones((p.shape[0],2))*np.array(l[1:]),axis=1)
             d = detect_low_values(dist,tresh_reach0,tresh_leave0)

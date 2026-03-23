@@ -60,16 +60,14 @@ def get_annotation(annotation_file,n,list_holds,time):
 
     for d in annotation.index:
         l = annotation["Member parts"][d]
-        if l != '' and annotation["Holds ID"][d] != "-1":
-            #print('taa,d',annotation["Time"][d],d)
+        if l != '' and str(annotation["Holds ID"][d]) != "-1":
             i = np.argmin(np.abs(time-time_annotation[d]))
-            if annotation["Action"][d] == "A" and annotation["Holds ID"][d] != "0":
-#                print("d:",d,"l:",l,"hid:",annotation["Holds ID"][d])
-#                for w in annotation_ts[l]:
-#                    print("annot ts[l]:",w)
-                annotation_ts[l][annotation["Holds ID"][d]][i] = 1
-            if annotation["Action"][d] == "D" and annotation["Holds ID"][d] != "0":
-                annotation_ts[l][annotation["Holds ID"][d]][i] = -1
+            if annotation["Action"][d] == "A":# and str(annotation["Holds ID"][d]) != "0": # We used 0 for "nothing". Is it a hold now?
+                annotation_ts[l][str(annotation["Holds ID"][d])][i] = 1
+
+            if annotation["Action"][d] == "D": #and str(annotation["Holds ID"][d]) != "0":
+                annotation_ts[l][str(annotation["Holds ID"][d])][i] = -1
+
     for l in annotation_ts:
         for en,h in enumerate(list_holds):
 #            annotation_ts[l][en] = np.cumsum(annotation_ts[l][en]) # changement 16/01

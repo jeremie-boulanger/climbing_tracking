@@ -15,6 +15,8 @@ import subprocess
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+
+
 '''
 def yolo_tracking(video_file, tracking_yolo, title= None, out_image_name=None, model_name = 'yolov8l.pt', display = True, stream=True):
     cap = cv2.VideoCapture(video_file)
@@ -122,9 +124,6 @@ def yolo_tracking(video_file, tracking_yolo, title= None, out_image_name=None, m
     
     '''
 
-
-
-
 def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_name=None, model_name='yolov8l.pt', title=None, display=True, stream=True):
     cap = cv2.VideoCapture(video_file)
     if not cap.isOpened():
@@ -134,6 +133,7 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
     frame_height = int(cap.get(4))
     length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    _, frame0 = cap.read()
     cap.release()
 
     st.write("Video frame size:", frame_width, frame_height)
@@ -150,6 +150,8 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
     heatmap_acc = np.zeros((frame_height, frame_width), dtype=np.float32)
 
     for i, r in enumerate(results):
+        if i>100:
+            break
         bar_yolo.progress(i / length, text="Tracking progress")
 
         try:
@@ -203,7 +205,8 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
             os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
             plt.savefig(out_image_name)
     else:
-        myfig = plt.figure()
+        myfig = plt.figure(dpi=100)
+        plt.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
         m = 0
         tracking_person2 = -1
         for idx in set(l3):
@@ -219,12 +222,14 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
                     ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
                     lt.append(t)
             if len(lx) > 100:
-                plt.plot(lx, ly, label=str(idx))
+                plt.plot(lx,[frame_height - y for y in ly], label=str(idx))
                 if max(ly) > m:
                     m = max(ly)
                     tracking_person2 = tracking_person
         plt.legend()
+
         plt.title((title or "") + " tracking climber:" + str(tracking_person2))
+        plt.tight_layout()
         if out_image_name:
             os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
             plt.savefig(out_image_name)

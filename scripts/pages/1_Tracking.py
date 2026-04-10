@@ -207,7 +207,7 @@ with col_yolo:
             st.image(
                 img_tracking_rgb,
                 caption=f"Tracking Image: {st.session_state.title}",
-                width=image_width
+                width = 'stretch'
             )
 
         # Heatmap
@@ -217,7 +217,7 @@ with col_yolo:
             st.image(
                 heatmap_rgb,
                 caption="Accumulated Heatmap",
-                width=image_width
+                width = 'stretch'
             )
 
 

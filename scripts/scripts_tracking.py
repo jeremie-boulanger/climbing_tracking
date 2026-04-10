@@ -5,7 +5,7 @@ import pickle
 import sys
 import re
 from scipy import interpolate
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, medfilt
 import pandas as pd
 import mediapipe as mp
 from ultralytics import YOLO
@@ -134,6 +134,7 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
     frame_height = int(cap.get(4))
     length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    _, frame0 = cap.read() # Just for the background of the plot
     cap.release()
 
     st.write("Video frame size:", frame_width, frame_height)
@@ -177,7 +178,8 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
             l3.append(l2)
 
     if display:
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(dpi=100)
+        ax.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
         m = 0
         tracking_person2 = -1
         for idx in set(l3):
@@ -203,7 +205,8 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
             os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
             plt.savefig(out_image_name)
     else:
-        myfig = plt.figure()
+        myfig = plt.figure(dpi=100)
+        plt.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
         m = 0
         tracking_person2 = -1
         for idx in set(l3):
@@ -219,11 +222,15 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
                     ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
                     lt.append(t)
             if len(lx) > 100:
-                plt.plot(lx, ly, label=str(idx))
+                plt.plot(lx, [frame_height - y for y in ly], label=str(idx))
                 if max(ly) > m:
                     m = max(ly)
                     tracking_person2 = tracking_person
         plt.legend()
+        plt.xticks([])
+        plt.yticks([])
+        plt.tight_layout()
+
         plt.title((title or "") + " tracking climber:" + str(tracking_person2))
         if out_image_name:
             os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
@@ -268,14 +275,29 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
 
 
 
-'''    
+  
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:
         track_yolo = pickle.load(o)
     list_detection = track_yolo['list_detection']
     list_tracking_person = track_yolo['tracking_person']
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5, min_tracking_confidence=0.8) 
+#    mp_pose = mp.solutions.pose
+#    pose = mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5, min_tracking_confidence=0.8) 
+
+    # ---------- MediaPipe PoseLandmarker ----------
+    MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"MediaPipe model not found: {MODEL_PATH}")
+
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=vision.RunningMode.IMAGE,
+        min_pose_detection_confidence=0.7,
+        min_pose_presence_confidence=0.7,
+        min_tracking_confidence=0.9
+    )
+
+    landmarker = PoseLandmarker.create_from_options(options)
 
     list_pose= []
     cap = cv2.VideoCapture(video_file)
@@ -300,19 +322,34 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
             if tracking_person in list_detection[t_idx]['id']:
                 i_idx = list_detection[t_idx]['id'].index(tracking_person)
                 b = list_detection[t_idx]['boxes'][i_idx,:]
-                image2 = image[int(b[1]):int(b[3]),int(b[0]):int(b[2]),:]
-                results = pose.process(image2)
-                rp = results.pose_landmarks
-                rpw = results.pose_world_landmarks
+                image_crop = image[int(b[1]):int(b[3]),int(b[0]):int(b[2]),:].astype(np.uint8)
+
+
+#                image_crop = image[int(b[1]):int(b[3]),int(b[0]):int(b[2])]
+
+                if image_crop.size == 0:
+                    break
+
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_crop)
+                result = landmarker.detect(mp_image)
+                if not result.pose_landmarks:
+                    #t_idx += 1
+                    continue
+                rp = result.pose_landmarks
+                rpw = result.pose_world_landmarks
+#                print(rp)
+#                results = pose.process(image2)
+#                rp = results.pose_landmarks
+#                rpw = results.pose_world_landmarks
                 if rp is not None:
-        #            lrp = [{'x':l.x,'y':l.y, 'z':l.z, 'visib':l.visibility} for l in rp.landmark]
-                    lrp = [{'x':b[0]+(b[2]-b[0])*l.x,'y':b[1]+(b[3]-b[1])*l.y, 'z':l.z, 'visib':l.visibility} for l in rp.landmark]
-                    lrpw= [{'x':l.x,'y':l.y, 'z':l.z, 'visib':l.visibility} for l in rpw.landmark]
+                    lrp = [{'x':b[0]+(b[2]-b[0])*l.x,'y':b[1]+(b[3]-b[1])*l.y, 'z':l.z, 'visib':l.visibility} for l in rp[0]]
+                    lrpw= [{'x':l.x,'y':l.y, 'z':l.z, 'visib':l.visibility} for l in rpw[0]]
                     list_pose.append({'timestamp':list_detection[t_idx]['timestamp'],'pose':lrp, 'world pose':lrpw, 'size':(width, height)})
                 break
         t_idx += 1
 
-    pose.close()
+#    pose.close()
+    landmarker.close()
     cap.release()
 
     save = True # Saving the tracking
@@ -322,7 +359,7 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
             pickle.dump(list_pose, handle)
     bar_mediapipe.empty()
     return
-'''
+
 
 '''
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
@@ -431,7 +468,7 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
 '''
 
 
-def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
+def mediapipe_tracking_v2(video_file, tracking_yolo, tracking_initial):
 
     # ---------- Load YOLO tracking ----------
     with open(tracking_yolo, 'rb') as o:
@@ -555,10 +592,181 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_initial, 'wb') as handle:
         pickle.dump(list_pose, handle)
 
+def mediapipe_tracking_v3(video_file, tracking_yolo, tracking_initial):
+    # Load YOLO tracking results
+    with open(tracking_yolo, 'rb') as o:
+        track_yolo = pickle.load(o)
+    list_detection = track_yolo['list_detection']
+    list_tracking_person = track_yolo['tracking_person']
+
+    # Initialize MediaPipe PoseLandmarker with the new API
+    MODEL_PATH = "./mediapipe_models/pose_landmarker_full.task"
+    options = vision.PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=vision.RunningMode.IMAGE,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.8
+    )
+    landmarker = vision.PoseLandmarker.create_from_options(options)
+
+    # Initialize video capture
+    cap = cv2.VideoCapture(video_file)
+    if not cap.isOpened():
+        raise IOError("Error opening video stream or file")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    list_pose = []
+    t_idx = 0
+    bar_mediapipe = st.progress(0., text="Tracking progress")
+
+    while cap.isOpened():
+        bar_mediapipe.progress(t_idx / total_frames, text="Tracking progress")
+        ret, image = cap.read()
+        if not ret or t_idx >= len(list_detection):
+            break
+
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+
+        for tracking_person in list_tracking_person:
+            if tracking_person in list_detection[t_idx]['id']:
+                i_idx = list_detection[t_idx]['id'].index(tracking_person)
+                b = list_detection[t_idx]['boxes'][i_idx, :]
+
+                # Crop image to bounding box
+                x1, y1, x2, y2 = map(int, b)
+                image_cropped = image_rgb[y1:y2, x1:x2, :]
+                mp_image_cropped = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_cropped)
+
+                # Process cropped image
+                result = landmarker.detect(mp_image_cropped)
+
+                if result.pose_landmarks:
+                    # Convert landmarks to absolute coordinates
+                    lrp = [{
+                        'x': x1 + (x2 - x1) * l.x,
+                        'y': y1 + (y2 - y1) * l.y,
+                        'z': l.z,
+                        'visib': l.visibility
+                    } for l in result.pose_landmarks[0]]
+
+                    # World landmarks
+                    lrpw = [{
+                        'x': l.x,
+                        'y': l.y,
+                        'z': l.z,
+                        'visib': l.visibility
+                    } for l in result.pose_world_landmarks[0]]
+
+                    list_pose.append({
+                        'timestamp': list_detection[t_idx]['timestamp'],
+                        'pose': lrp,
+                        'world pose': lrpw,
+                        'size': (width, height)
+                    })
+                break
+
+        t_idx += 1
+
+    landmarker.close()
+    cap.release()
+    bar_mediapipe.empty()
+
+    # ---------- Safety check ----------
+    if not list_pose:
+        raise ValueError(
+            "No pose detected. "
+            "Check YOLO boxes, MediaPipe model, or video quality."
+        )
 
 
+    # Save results
+    os.makedirs(os.path.dirname(tracking_initial), exist_ok=True)
+    with open(tracking_initial, 'wb') as handle:
+        pickle.dump(list_pose, handle)
+
+    return list_pose
 
 def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file, w_c, dx, dy):
+    median_win = 21
+    with open(tracking_initial,'rb') as o:
+        list_pose = pickle.load(o)
+    #w_c = 0.1 # cutting Shannon pulsation
+
+    width  = list_pose[0]['size'][0]
+    height = list_pose[0]['size'][1]    
+
+    time = np.array([l['timestamp'] for l in list_pose])
+    dt = np.median(np.diff(time))
+    time2=np.arange(time[0],time[-1]+dt,dt)
+    time2[-1] = min(time2[-1],time[-1])
+    b,a = butter(3,w_c,btype='low')
+
+
+    list_body_indexes = {"H": [23,24], "LH": [15,21,19,17], "RH": [16,22,20,18], "LF": [27,29,31], "RF": [28,30,32]}
+    data = {'Time (s)':time2/1000.}
+
+
+    for l in list_body_indexes:
+
+        # determine the position
+        pos = np.array([np.array([[l['pose'][i]['x'],l['pose'][i]['y']] for l in list_pose]) for i in list_body_indexes[l]])
+        pos = np.mean(pos,axis=0)
+        for j in range(pos.shape[1]):
+            pos[:,j] = medfilt(pos[:,j], median_win)   
+
+        # determine the visibility
+        visib = np.array([np.array([[l['pose'][i]['visib']] for l in list_pose]) for i in list_body_indexes[l]])
+        visib = np.clip(np.mean(visib,axis=0),0.2,1) # clipping to avoid non stability
+
+        # interpolate and low pass filter
+        f = interpolate.interp1d(time,pos,axis=0)
+        pos = f(time2)
+        f = interpolate.interp1d(time,visib,axis=0)
+        visib = f(time2)[:,0]
+        for j in range(pos.shape[1]):
+            pos[:,j] = filtfilt(b, a, pos[:,j] * visib, axis=0) / filtfilt(b, a, visib, axis=0)
+        visib = filtfilt(b, a, visib, axis=0)
+        
+        data[l+"x (pix)"] = np.clip(pos[:,0],0,width-1)
+        data[l+"y (pix)"] = np.clip(pos[:,1],0,height-1)
+        
+        
+        data[l+' visib'] = visib[:]
+        
+
+        # compute the velocity
+        v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
+        v = np.insert(v,0,v[0])
+
+        data[l+"v (pix/s)"] = v[:]
+
+        pos[:,0] *= dx
+        pos[:,1] *= dy
+        v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
+        v = np.insert(v,0,v[0])
+        data[l+"x (m)"] = np.clip(pos[:,0],0,width-1)
+        data[l+"y (m)"] = np.clip(pos[:,1],0,height-1)
+        data[l+"v (m/s)"] = v[:]
+    df = pd.DataFrame(data)
+    os.makedirs(os.path.dirname(xlsx_tracking_file), exist_ok=True)
+    os.makedirs(os.path.dirname(pickle_tracking_file), exist_ok=True)
+
+    df.to_excel(xlsx_tracking_file)
+    with open(pickle_tracking_file, 'wb') as handle:
+        data['dx'] = dx
+        data['dy'] = dy
+        pickle.dump(data, handle)
+    return 
+
+
+def extract_tracking_v3(tracking_initial, pickle_tracking_file, xlsx_tracking_file, w_c, dx, dy):
+    
     with open(tracking_initial,'rb') as o:
         list_pose = pickle.load(o)
     #w_c = 0.1 # cutting Shannon pulsation
@@ -574,6 +782,11 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
 
     pos  = np.array([[l['pose'][23]['x'],l['pose'][23]['y']] for l in list_pose])
     pos += np.array([[l['pose'][24]['x'],l['pose'][24]['y']] for l in list_pose])
+    pos = pos/2
+    visib  = np.array([l['pose'][23]['visib'] for l in list_pose])
+    visib += np.array([l['pose'][24]['visib'] for l in list_pose])
+    visib = visib/2
+    
     pos_H = filtfilt(b,a,pos/2,axis=0)
     f = interpolate.interp1d(time,pos_H,axis=0)
     pos_H = f(time2)
@@ -685,6 +898,82 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
     data['Hx (m)'] = s[:,0]
     data['Hy (m)'] = s[:,1]
     data['Hv (m/s)'] = v
+    
+
+
+    df = pd.DataFrame(data)
+    os.makedirs(os.path.dirname(xlsx_tracking_file), exist_ok=True)
+    os.makedirs(os.path.dirname(pickle_tracking_file), exist_ok=True)
+
+    df.to_excel(xlsx_tracking_file)
+    with open(pickle_tracking_file, 'wb') as handle:
+        data['dx'] = dx
+        data['dy'] = dy
+        pickle.dump(data, handle)
+    return 
+
+
+def extract_tracking_v2(tracking_initial, pickle_tracking_file, xlsx_tracking_file, w_c, dx, dy):
+    median_win = 21
+    with open(tracking_initial,'rb') as o:
+        list_pose = pickle.load(o)
+    #w_c = 0.1 # cutting Shannon pulsation
+
+    width  = list_pose[0]['size'][0]
+    height = list_pose[0]['size'][1]    
+
+    time = np.array([l['timestamp'] for l in list_pose])
+    dt = np.median(np.diff(time))
+    time2=np.arange(time[0],time[-1]+dt,dt)
+    time2[-1] = min(time2[-1],time[-1])
+    b,a = butter(3,w_c,btype='low')
+
+
+    list_body_indexes = {"H": [23,24], "LH": [15,21,19,17], "RH": [16,22,20,18], "LF": [27,29,31], "RF": [28,30,32]}
+    data = {'Time (s)':time2/1000.}
+
+
+    for l in list_body_indexes:
+
+        # determine the position
+        pos = np.array([np.array([[l['pose'][i]['x'],l['pose'][i]['y']] for l in list_pose]) for i in list_body_indexes[l]])
+        pos = np.mean(pos,axis=0)
+        for j in range(pos.shape[1]):
+            pos[:,j] = medfilt(pos[:,j], median_win)   
+
+        # determine the visibility
+        visib = np.array([np.array([[l['pose'][i]['visib']] for l in list_pose]) for i in list_body_indexes[l]])
+        visib = np.clip(np.mean(visib,axis=0),0.2,1) # clipping to avoid non stability
+
+        # interpolate and low pass filter
+        f = interpolate.interp1d(time,pos,axis=0)
+        pos = f(time2)
+        f = interpolate.interp1d(time,visib,axis=0)
+        visib = f(time2)[:,0]
+        for j in range(pos.shape[1]):
+            pos[:,j] = filtfilt(b, a, pos[:,j] * visib, axis=0) / filtfilt(b, a, visib, axis=0)
+        visib = filtfilt(b, a, visib, axis=0)
+        
+        data[l+"x (pix)"] = np.clip(pos[:,0],0,width-1)
+        data[l+"y (pix)"] = np.clip(pos[:,1],0,height-1)
+        
+        
+        data[l+' visib'] = visib[:]
+        
+
+        # compute the velocity
+        v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
+        v = np.insert(v,0,v[0])
+
+        data[l+"v (pix/s)"] = v[:]
+
+        pos[:,0] *= dx
+        pos[:,1] *= dy
+        v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
+        v = np.insert(v,0,v[0])
+        data[l+"x (m)"] = np.clip(pos[:,0],0,width-1)
+        data[l+"y (m)"] = np.clip(pos[:,1],0,height-1)
+        data[l+"v (m/s)"] = v[:]
 
     df = pd.DataFrame(data)
     os.makedirs(os.path.dirname(xlsx_tracking_file), exist_ok=True)
@@ -718,11 +1007,62 @@ def write_on_video(video_file, video_out, tracking_file):
     pos = {}
     with open(tracking_file,'rb') as o:
         list_pos = pickle.load(o)
+
+    i = 0
+    cap = cv2.VideoCapture(video_file)
+    if cap.isOpened() == False:
+        print("Error opening video stream or file")
+        raise TypeError
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    os.makedirs(os.path.dirname(video_out), exist_ok=True)
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",  # overwrite output
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{frame_width}x{frame_height}",
+        "-r", str(fps),
+        "-i", "-",  # input from stdin
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "23",
+        video_out
+    ]
+
+    # Start ffmpeg subprocess
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+    while(True):
+        ret, frame = cap.read()
+        if not ret or i>=len(list_pos["LFx (pix)"]):
+            break
+        cv2.circle(frame,(int(list_pos["LFx (pix)"][i]),int(list_pos["LFy (pix)"][i])), int(15*list_pos["LF visib"][i]), (255,255,0), -1)
+        cv2.circle(frame,(int(list_pos["RFx (pix)"][i]),int(list_pos["RFy (pix)"][i])), int(15*list_pos["RF visib"][i]), (0,255,0), -1)
+        cv2.circle(frame,(int(list_pos["LHx (pix)"][i]),int(list_pos["LHy (pix)"][i])), int(15*list_pos["LH visib"][i]), (0,0,255), -1)
+        cv2.circle(frame,(int(list_pos["RHx (pix)"][i]),int(list_pos["RHy (pix)"][i])), int(15*list_pos["RH visib"][i]), (255,0,255), -1)
+        cv2.circle(frame,(int(list_pos["Hx (pix)"][i]) ,int(list_pos["Hy (pix)"][i])) , int(15*list_pos["H visib"][i]) , (0,255,255), -1)
+        for j in range(i):
+            cv2.circle(frame,(int(list_pos["Hx (pix)"][j]),int(list_pos["Hy (pix)"][j])), 3, (0,255,255), -1)            
+        proc.stdin.write(frame.tobytes())
+        i += 1
+    cap.release()
+    proc.stdin.close()
+    proc.wait()
+    return
+
+def write_on_video_v2(video_file, video_out, tracking_file):
+    pos = {}
+    with open(tracking_file,'rb') as o:
+        list_pos = pickle.load(o)
     for tp in ["RH","LH","RF","LF","H"]:
 #        detection[i0][tp] = {}
         time = list_pos["Time (s)"]
         n = time.shape[0]
         dt = np.mean(np.diff(time))
+
 
         p = np.zeros((n,2))
         p[:,0] = list_pos[tp+"x (pix)"]
@@ -767,12 +1107,13 @@ def write_on_video(video_file, video_out, tracking_file):
     if 1:
         while(True):
             ret, frame = cap.read()
-            if not ret or i>=pos['LF'].shape[0]:
+            if not ret or i>=pos['LF'].shape[0] or i>1000:
                 break
 
-            cv2.circle(frame,(int(pos['LF'][i,0]),int(pos['LF'][i,1])), 10, (0,255,0), -1)
+            
+            cv2.circle(frame,(int(pos['LF'][i,0]),int(pos['LF'][i,1])), 10, (255,255,0), -1)
             cv2.circle(frame,(int(pos['RF'][i,0]),int(pos['RF'][i,1])), 10, (0,255,0), -1)
-            cv2.circle(frame,(int(pos['RH'][i,0]),int(pos['RH'][i,1])), 10, (0,0,255), -1)
+            cv2.circle(frame,(int(pos['RH'][i,0]),int(pos['RH'][i,1])), 10, (255,0,255), -1)
             cv2.circle(frame,(int(pos['LH'][i,0]),int(pos['LH'][i,1])), 10, (0,0,255), -1)
             cv2.circle(frame,(int(pos['H'][i,0] ),int(pos['H'][i,1] )), 10, (0,255,255), -1)
             for j in range(i):

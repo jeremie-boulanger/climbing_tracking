@@ -13,7 +13,7 @@ import streamlit as st
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import f1_score
 
-def get_annotation_old(annotation_file,n,list_holds,time):
+def get_annotation_v0(annotation_file,n,list_holds,time):
     annotation = pd.read_excel(annotation_file)
     annotation_ts = {'LH':{}, 'RH':{}, 'LF':{}, 'RF':{}}
     for l in annotation_ts:
@@ -43,7 +43,7 @@ def get_annotation_old(annotation_file,n,list_holds,time):
     return annotation_ts
 
 
-def get_annotation(annotation_file,n,list_holds,time):
+def get_annotation_v1(annotation_file,n,list_holds,time):
     if '.xlsx' in annotation_file:
         annotation = pd.read_excel(annotation_file)
     if '.csv' in annotation_file:
@@ -72,6 +72,48 @@ def get_annotation(annotation_file,n,list_holds,time):
         for en,h in enumerate(list_holds):
 #            annotation_ts[l][en] = np.cumsum(annotation_ts[l][en]) # changement 16/01
             annotation_ts[l][h] = np.cumsum(annotation_ts[l][h])
+    return annotation_ts
+
+def get_annotation(annotation_file, n, list_holds, time):
+    # Load annotation file
+    if annotation_file.endswith('.xlsx'):
+        annotation = pd.read_excel(annotation_file)
+    elif annotation_file.endswith('.csv'):
+        annotation = pd.read_csv(annotation_file)
+    else:
+        raise ValueError("Unsupported file format. Use .csv or .xlsx.")
+
+    # Convert time to seconds if in MM:SS format
+    time_annotation = annotation["Time"]
+    if isinstance(time_annotation[0], str) and ':' in time_annotation[0]:
+        time_annotation = [int(t.split(":")[0])*60 + float(t.split(":")[1]) for t in time_annotation]
+
+    # Initialize output structure
+    limbs = ['LH', 'RH', 'LF', 'RF']
+    annotation_ts = {limb: {hold: np.zeros(n) for hold in list_holds} for limb in limbs}
+    hold_states = {limb: {hold: 0 for hold in list_holds} for limb in limbs}
+
+    # Process each annotation
+    for _, row in annotation.iterrows():
+        limb = row["Member parts"]
+        hold_id = str(row["Holds ID"])
+        action = row["Action"]
+
+        if limb in limbs and hold_id in list_holds and hold_id != "-1":
+            i = np.argmin(np.abs(time - time_annotation[_]))
+            if action == "A" and hold_states[limb][hold_id] == 0:
+                annotation_ts[limb][hold_id][i] = 1
+                hold_states[limb][hold_id] = 1
+            elif action == "D" and hold_states[limb][hold_id] == 1:
+                annotation_ts[limb][hold_id][i] = -1
+                hold_states[limb][hold_id] = 0
+
+    # Ensure all holds end in a "not occupied" state
+    for limb in annotation_ts:
+        for hold in annotation_ts[limb]:
+            if hold_states[limb][hold] == 1:
+                annotation_ts[limb][hold][-1] = -1
+
     return annotation_ts
 
 def get_pos(tracking_file):

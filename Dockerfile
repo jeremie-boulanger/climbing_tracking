@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
@@ -48,6 +49,9 @@ ENV MEDIAPIPE_MODEL_DIR=/app/.mediapipe
 RUN python3 -c "from ultralytics import YOLO; model = YOLO('yolov8x-pose.pt')"
 #RUN python3 -c "import mediapipe as mp; mp.solutions.pose.Pose(static_image_mode=True)"
 #RUN python3 -c "from mediapipe.python import solutions as mp_solutions; mp_solutions.pose.Pose(static_image_mode=True)"
+
+RUN wget -O /app/.mediapipe/pose_landmarker_full.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+
 RUN python3 - <<'EOF'
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -59,7 +63,7 @@ PoseLandmarkerOptions = python.vision.PoseLandmarkerOptions
 
 options = PoseLandmarkerOptions(
     base_options=BaseOptions(
-        model_asset_path="/app/.mediapipe/pose_landmarker_lite.task"
+        model_asset_path="/app/.mediapipe/pose_landmarker_full.task"
     ),
     running_mode=RunningMode.IMAGE
 )

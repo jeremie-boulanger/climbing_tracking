@@ -329,7 +329,7 @@ with col_video:
     if video_submit:
         if 1:#with placeholders["status_video"]:
             with st.spinner("Generating video..."):
-                write_on_video_v2(
+                write_on_video(
                     st.session_state.video,
                     st.session_state.video_tracking,
                     st.session_state.tracking_pickle,

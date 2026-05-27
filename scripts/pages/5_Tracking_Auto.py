@@ -10,7 +10,7 @@ from scripts_tracking_auto import *
 # Page config (must be FIRST!)
 # --------------------------------------------------
 st.set_page_config(layout="wide")
-st.title("Tracking App")
+st.title("Automatic Tracking App")
 
 # --------------------------------------------------
 # Session State Initialization
@@ -46,7 +46,7 @@ col_yolo, col_video, _ = st.columns(3)
 # --------------------------------------------------
 with col_yolo:
 
-    st.header("YOLO tracking: track every person in the video")
+    st.header("YOLO tracking automatic : track every person in the video")
     show_example = st.toggle("Show JSON example")
 
     if show_example:
@@ -83,6 +83,8 @@ with col_yolo:
                 "delta t": 0.02,
             }]
         })
+    
+    submitted_media_all = st.toggle("Generate Media for all sessions")
 
     # ---------------- JSON uploader ----------------
     uploaded_file = st.file_uploader("Upload session JSON", type=["json"])
@@ -154,6 +156,28 @@ with col_yolo:
                                         s.get("pixel size Y (m/p)", 0.0),
                                     )
                         st.success("YOLO on all sessions complete.")
+                
+                    if submitted_media_all:
+                        with st.spinner("Run media for all sessions"):
+                            
+                            for i, s in enumerate(sessions):
+                                t = s.get("title", "")
+                                current_video = s.get("video", "")
+                                current_wall = s.get("wall image", "")
+                                current_video_out = s.get("video_tracking", "")
+                                current_pickle = s.get("tracking_pickle", "")
+
+                                # Wall Image
+                                if current_video and current_wall:
+                                    if not os.path.isfile(current_wall):
+                                        extract_median_image(current_video, current_wall)
+
+                                # Video
+                                if current_video and current_video_out and current_pickle:
+                                    if not os.path.isfile(current_video_out) and os.path.isfile(current_pickle):
+                                        write_on_video(current_video,current_video_out,current_pickle)
+                                        
+                            st.success("Media and YOLO for all sessions complete.")
                         
 
 
@@ -287,7 +311,7 @@ with col_video:
     if video_submit:
         if 1:#with placeholders["status_video"]:
             with st.spinner("Generating video..."):
-                write_on_video_v2(
+                write_on_video(
                     st.session_state.video,
                     st.session_state.video_tracking,
                     st.session_state.tracking_pickle,

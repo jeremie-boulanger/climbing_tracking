@@ -4,7 +4,7 @@ import streamlit as st
 import json
 import os
 import pickle
-from scripts_tracking import *
+from scripts_tracking_auto import *
 
 # --------------------------------------------------
 # Page config (must be FIRST!)
@@ -39,7 +39,7 @@ for key, value in defaults.items():
 # --------------------------------------------------
 # Columns Layout
 # --------------------------------------------------
-col_yolo, col_mediapipe, col_video = st.columns(3)
+col_yolo, col_video, _ = st.columns(3)
 
 # --------------------------------------------------
 # YOLO COLUMN
@@ -100,7 +100,6 @@ with col_yolo:
                 )
                 s = next(x for x in sessions if x["title"] == selected)
 
-                # Update state safely
                 st.session_state.title = s.get("title", "")
                 st.session_state.video = s.get("video", "")
                 st.session_state.tracking_yolo = s.get("tracking_yolo", "")
@@ -141,6 +140,19 @@ with col_yolo:
                                         display=False,
                                         stream=True
                                     )
+                                    mediapipe_tracking(
+                                        s.get("video", ""),
+                                        s.get("tracking_yolo", ""),
+                                        s.get("tracking_mediapipe", ""),
+                                    )
+                                    extract_tracking(
+                                        s.get("tracking_mediapipe", ""),
+                                        s.get("tracking_pickle", ""),
+                                        s.get("tracking_xlsx", ""),
+                                        s.get("frequency cut-off", 0.5),
+                                        s.get("pixel size X (m/p)", 0.0),
+                                        s.get("pixel size Y (m/p)", 0.0),
+                                    )
                         st.success("YOLO on all sessions complete.")
                         
 
@@ -171,10 +183,9 @@ with col_yolo:
             submitted_yolo = st.form_submit_button("Run YOLO Tracking")
 
     if submitted_yolo:
+        # YOLO
         with st.spinner("Running YOLO tracking..."):
-            # Vérifier si le pickle existe
             if not os.path.isfile(st.session_state.tracking_yolo):
-                # Appel de yolo_tracking avec la nouvelle signature
                 detections, people, heatmap_acc = yolo_tracking(
                     st.session_state.video,
                     st.session_state.tracking_yolo,
@@ -186,18 +197,35 @@ with col_yolo:
                     stream=True
                 )
             else:
-                # Charger les données existantes
                 with open(st.session_state.tracking_yolo, "rb") as f:
                     data = pickle.load(f)
                 detections = data["list_detection"]
                 people = data["tracking_person"]
-                if os.path.isfile(st.session_state.heatmap_tracking):
-                    heatmap_acc = cv2.imread(st.session_state.heatmap_tracking, cv2.IMREAD_UNCHANGED)
-                else:
-                    heatmap_acc = None
+                heatmap_acc = None
 
             st.session_state.list_climbers_tracking = ",".join(map(str, people))
-            st.success("YOLO complete.")
+            st.success(f"YOLO complete. Climber détecté : {people}")
+
+        # Mediapipe
+        with st.spinner("Running Mediapipe tracking..."):
+            mediapipe_tracking(
+                st.session_state.video,
+                st.session_state.tracking_yolo,
+                st.session_state.tracking_mediapipe,
+            )
+            st.success("Mediapipe complete.")
+
+        # Extraction
+        with st.spinner("Extracting pose data..."):
+            extract_tracking(
+                st.session_state.tracking_mediapipe,
+                st.session_state.tracking_pickle,
+                st.session_state.tracking_xlsx,
+                st.session_state.freq_cut,
+                st.session_state.pixel_size_x,
+                st.session_state.pixel_size_y,
+            )
+            st.success("Extraction complete.")
 
     # ---------------- Preview YOLO Image & Heatmap ----------------
     placeholder_yolo_image = st.empty()
@@ -224,76 +252,6 @@ with col_yolo:
                 caption="Accumulated Heatmap",
                 width = 'stretch'
             )
-
-
-
-# --------------------------------------------------
-# MEDIAPIPE COLUMN
-# --------------------------------------------------
-with col_mediapipe:
-
-    st.header("Mediapipe Pose Tracking")
-    placeholder_mediapipe = st.empty()
-    with placeholder_mediapipe:
-        with st.form("mediapipe_form"):
-            st.text_input("Climbers to track, e.g: 2,3,6", key="list_climbers_tracking")
-            st.text_input("Mediapipe Tracking OUT", key="tracking_mediapipe")
-            submitted_mediapipe = st.form_submit_button("Run Mediapipe")
-
-    if submitted_mediapipe:
-        if len(st.session_state.list_climbers_tracking)==0:
-            st.warning("Climbers to track is empty, use list of int seperated by commas.")
-        if len(st.session_state.list_climbers_tracking)>0: #with placeholders["status_mediapipe"]:
-            with st.spinner("Running Mediapipe tracking..."):
-
-                climbers = [int(x) for x in st.session_state.list_climbers_tracking.split(",")]
-
-                # Load previous YOLO tracking
-                with open(st.session_state.tracking_yolo, "rb") as f:
-                    data = pickle.load(f)
-                detections = data["list_detection"]
-
-                prev = data["tracking_person"]
-                if climbers != prev:
-                    with open(st.session_state.tracking_yolo, "wb") as f:
-                        pickle.dump(
-                            {"list_detection": detections, "tracking_person": climbers},
-                            f,
-                            protocol=pickle.HIGHEST_PROTOCOL,
-                        )
-
-                mediapipe_tracking(
-                    st.session_state.video,
-                    st.session_state.tracking_yolo,
-                    st.session_state.tracking_mediapipe,
-                )
-
-                st.success("Mediapipe complete.")
-
-    # -------------- EXTRACTION ------------------
-    st.header("Extract Pose & Export")
-    placeholder_extraction = st.empty()
-    with placeholder_extraction:
-        with st.form("extract_form"):
-            st.text_input("Pickle OUT", key="tracking_pickle")
-            st.text_input("Excel OUT", key="tracking_xlsx")
-            st.number_input("Pixel Size X (m/p)", key="pixel_size_x")
-            st.number_input("Pixel Size Y (m/p)", key="pixel_size_y")
-            st.number_input("Cut-off Frequency", key="freq_cut")
-            submitted_extract = st.form_submit_button("Extract Tracking")
-
-    if submitted_extract:
-        if 1:#with placeholders["status_extract"]:
-            with st.spinner("Extracting pose data..."):
-                extract_tracking(
-                    st.session_state.tracking_mediapipe,
-                    st.session_state.tracking_pickle,
-                    st.session_state.tracking_xlsx,
-                    st.session_state.freq_cut,
-                    st.session_state.pixel_size_x,
-                    st.session_state.pixel_size_y
-                )
-                st.success("Extraction complete.")
 
 # --------------------------------------------------
 # VIDEO COLUMN

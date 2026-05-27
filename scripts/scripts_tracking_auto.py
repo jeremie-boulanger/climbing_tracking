@@ -77,6 +77,7 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
         fig, ax = plt.subplots(dpi=100)
         ax.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
         m = 0
+        best_score = 0
         tracking_person2 = -1
         for idx in set(l3):
             tracking_person = idx
@@ -92,8 +93,12 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
                     lt.append(t)
             if len(lx) > 100:
                 ax.plot(lx, ly, label=str(idx))
-                if max(ly) > m:
-                    m = max(ly)
+                max_x = max(ly) - min(ly)
+                mean_x = sum(lx) / len(lx)
+                center = abs(mean_x - (frame_width / 2))
+                score = max_x - (0.5 * center) # hauteur - (pénalité * distance par rapport au centre)
+                if score > best_score:
+                    best_score = score
                     tracking_person2 = tracking_person
         ax.legend()
         st.pyplot(fig)
@@ -104,6 +109,7 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
         myfig = plt.figure(dpi=100)
         plt.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
         m = 0
+        best_score = 0
         tracking_person2 = -1
         for idx in set(l3):
             tracking_person = idx
@@ -119,8 +125,12 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
                     lt.append(t)
             if len(lx) > 100:
                 plt.plot(lx, [frame_height - y for y in ly], label=str(idx))
-                if max(ly) > m:
-                    m = max(ly)
+                max_x = max(ly) - min(ly)
+                mean_x = sum(lx) / len(lx)
+                center = abs(mean_x - (frame_width / 2))
+                score = max_x - (0.5 * center) # hauteur - (pénalité * distance par rapport au centre)
+                if score > best_score:
+                    best_score = score
                     tracking_person2 = tracking_person
         plt.legend()
         plt.xticks([])
@@ -168,12 +178,12 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
         pickle.dump({'list_detection': list_detection, 'tracking_person':[tracking_person2]}, handle)
 
     return list_detection, [tracking_person2], heatmap_acc
-  
+
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:
         track_yolo = pickle.load(o)
     list_detection = track_yolo['list_detection']
-    list_tracking_person = track_yolo['tracking_person']
+    list_tracking_person = track_yolo['tracking_person'] 
 
     # ---------- MediaPipe PoseLandmarker ----------
     MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"
@@ -214,14 +224,12 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
                 i_idx = list_detection[t_idx]['id'].index(tracking_person)
                 b = list_detection[t_idx]['boxes'][i_idx,:]
                 image_crop = image[int(b[1]):int(b[3]),int(b[0]):int(b[2]),:].astype(np.uint8)
-
                 if image_crop.size == 0:
                     break
 
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_crop)
                 result = landmarker.detect(mp_image)
                 if not result.pose_landmarks:
-                    #t_idx += 1
                     continue
                 rp = result.pose_landmarks
                 rpw = result.pose_world_landmarks
@@ -231,7 +239,6 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
                     list_pose.append({'timestamp':list_detection[t_idx]['timestamp'],'pose':lrp, 'world pose':lrpw, 'size':(width, height)})
                 break
         t_idx += 1
-
     landmarker.close()
     cap.release()
 
@@ -314,7 +321,7 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
         data['dy'] = dy
         pickle.dump(data, handle)
     return 
-
+    
 def extract_median_image(video_file, image_file):
     cap = cv2.VideoCapture(video_file)
     frameIds = cap.get(cv2.CAP_PROP_FRAME_COUNT) * np.random.uniform(size=25)
@@ -331,6 +338,7 @@ def extract_median_image(video_file, image_file):
     cv2.imwrite(image_file, median_frame) 
     return
     
+
 def write_on_video(video_file, video_out, tracking_file):
     pos = {}
     with open(tracking_file,'rb') as o:

@@ -1,6 +1,8 @@
 # Page Title: Main
 
 import streamlit as st
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 st.set_page_config(page_title="Climbing tracking", page_icon="🧗‍♀️")
 

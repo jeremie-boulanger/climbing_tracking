@@ -2,6 +2,7 @@ data/
 myenv/
 mediapipe_models/
 *.pt
+*.ipynb
 
 .README.txt.swp
 .ipynb_checkpoints/

@@ -12,67 +12,7 @@ from torch import Tensor
 import streamlit as st
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import f1_score
-
-def get_annotation_v0(annotation_file,n,list_holds,time):
-    annotation = pd.read_excel(annotation_file)
-    annotation_ts = {'LH':{}, 'RH':{}, 'LF':{}, 'RF':{}}
-    for l in annotation_ts:
-        for en,h in enumerate(list_holds):
-            annotation_ts[l][en] = np.zeros(n)
-
-    for d in annotation.index:
-        l = ''
-        if annotation["Membre"][d] == 'MG':
-            l = 'LH'
-        if annotation["Membre"][d] == 'MD':
-            l = 'RH'
-        if annotation["Membre"][d] == 'PG':
-            l = 'LF'
-        if annotation["Membre"][d] == 'PD':
-            l = 'RF'
-
-        if l != '' and annotation["Prise ID"][d]>-1:
-            i = np.argmin(np.abs(time-annotation["Temps"][d]))
-            if annotation["AD"][d] == "A":
-                annotation_ts[l][annotation["Prise ID"][d]][i] = 1
-            if annotation["AD"][d] == "D":
-                annotation_ts[l][annotation["Prise ID"][d]][i] = -1
-    for l in annotation_ts:
-        for en,h in enumerate(list_holds):
-            annotation_ts[l][en] = np.cumsum(annotation_ts[l][en])
-    return annotation_ts
-
-
-def get_annotation_v1(annotation_file,n,list_holds,time):
-    if '.xlsx' in annotation_file:
-        annotation = pd.read_excel(annotation_file)
-    if '.csv' in annotation_file:
-        annotation = pd.read_csv(annotation_file)
-    time_annotation = annotation["Time"]
-    if ':' in time_annotation[0]:
-        time_annotation = [int(t.split(":")[0])*60+float(t.split(":")[1]) for t in time_annotation]
-    #print('ta:',time_annotation[0])
-    annotation_ts = {'LH':{}, 'RH':{}, 'LF':{}, 'RF':{}}
-    for l in annotation_ts:
-        for h in list_holds:
-
-            annotation_ts[l][h] = np.zeros(n) # changement 17/01
-
-    for d in annotation.index:
-        l = annotation["Member parts"][d]
-        if l != '' and str(annotation["Holds ID"][d]) != "-1":
-            i = np.argmin(np.abs(time-time_annotation[d]))
-            if annotation["Action"][d] == "A":# and str(annotation["Holds ID"][d]) != "0": # We used 0 for "nothing". Is it a hold now?
-                annotation_ts[l][str(annotation["Holds ID"][d])][i] = 1
-
-            if annotation["Action"][d] == "D": #and str(annotation["Holds ID"][d]) != "0":
-                annotation_ts[l][str(annotation["Holds ID"][d])][i] = -1
-
-    for l in annotation_ts:
-        for en,h in enumerate(list_holds):
-#            annotation_ts[l][en] = np.cumsum(annotation_ts[l][en]) # changement 16/01
-            annotation_ts[l][h] = np.cumsum(annotation_ts[l][h])
-    return annotation_ts
+from sklearn.model_selection import LeaveOneGroupOut
 
 def get_annotation(annotation_file, n, list_holds, time):
     # Load annotation file
@@ -114,6 +54,11 @@ def get_annotation(annotation_file, n, list_holds, time):
             if hold_states[limb][hold] == 1:
                 annotation_ts[limb][hold][-1] = -1
 
+    # convertit les A/D en binaire 
+    for limb in annotation_ts:
+        for hold in annotation_ts[limb]:
+            annotation_ts[limb][hold] = np.cumsum(annotation_ts[limb][hold])
+
     return annotation_ts
 
 def get_pos(tracking_file):
@@ -121,7 +66,6 @@ def get_pos(tracking_file):
     with open(tracking_file,'rb') as o:
         list_pos = pickle.load(o)
     for tp in ["RH","LH","RF","LF","H"]:
-#        detection[i0][tp] = {}
         time = list_pos["Time (s)"]
         n = time.shape[0]
         dt = np.median(np.diff(time))
@@ -150,7 +94,9 @@ def get_dataset(sessions, dataset_file):
 
     x = []
     y = []
-    for s in sessions:
+    m = []
+    i = []
+    for idx, s in enumerate(sessions):
         p = s["position"]
         a = s["annotation"]
         h = s["mask"]
@@ -161,7 +107,7 @@ def get_dataset(sessions, dataset_file):
         n = time.shape[0]
         annot = get_annotation(a.strip(),n, mask_holds, time)
         for tp in ["RH","LH","RF","LF"]:
-            p = list_pos[tp]     
+            p = list_pos[tp]
             p[:,0] = p[:,0]*dx
             p[:,1] = p[:,1]*dy
             velo = np.diff(p,axis=0)/dt
@@ -169,24 +115,19 @@ def get_dataset(sessions, dataset_file):
             acc = np.diff(velo,axis=0)/dt
             acc = np.concatenate((acc[0:1,:],acc))
             for l in mask_holds:
-                dist = mask_holds[l][(p[:,1]/dx).astype(int),(p[:,0]/dy).astype(int)][:,np.newaxis]
-#                    dist = mask_holds[en][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis] # changement 16/01
-#                except IndexError:
-#                    print("en:",en,"l:",l,"mask_size:",mask_holds[l].shape, "p1m:", np.max((p[:,1]/dy).astype(int)), "p0m:", np.max((p[:,0]/dx).astype(int)),"p1init:", (p[0,1]/dy).astype(int), "p0init:", (p[0,0]/dx).astype(int) )
-#                finally:
-#                    return                    
+                dist = mask_holds[l][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis]               
                 x.append(np.concatenate((dist.T,velo.T)).T)
-#                    y.append(annot[tp][en])   # changement 16/01
                 y.append(annot[tp][l])   
+                m.append(np.full(n, f"{tp} - Prise {l}")) # np.full pour être de même taille que annot[tp][l] et np.concatenate((dist.T,velo.T)).T
+                i.append(np.full(n,idx))
     x = np.concatenate(x)
     y = np.concatenate(y)
+    m = np.concatenate(m)
+    i = np.concatenate(i)
     os.makedirs(os.path.dirname(dataset_file), exist_ok=True)
     with open(dataset_file, 'wb') as handle:
-        pickle.dump({'x':x,'y':y}, handle)
+        pickle.dump({'x':x,'y':y,'m': m, 'i' : i}, handle)
     return
-    
-
-
    
 class u_neural(nn.Module):
     def __init__(self,X,Y,layers):
@@ -254,7 +195,7 @@ def get_f1_score(u_net,list_file_pos,list_file_annotation,list_folder_holds):
     return np.mean(f1)
 
 def get_f1_score2(u_net_file, dataset_file):
-    u_net = torch.jit.load(u_net_file)
+    u_net = torch.jit.load(u_net_file, map_location=device)
     u_net.eval()
     with open(dataset_file,'rb') as o:
         dataset = pickle.load(o)
@@ -277,15 +218,27 @@ def get_f1_score2(u_net_file, dataset_file):
     return f1.detach().numpy().tolist()
     
 
-def train_NN(dataset_file, network_file, layers=[10]*2,display=True,epochs=2000):
+def train_NN(dataset_file, network_file, layers=[64,16],display=True,epochs=4500):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     with open(dataset_file,'rb') as o:
         dataset = pickle.load(o)
-    X = torch.tensor(dataset["x"]).float()
-    Y = torch.tensor(dataset["y"][:,None]).float()
-    u_net = u_neural(X,Y,layers)
+    
+    # sous-échantillonnage + retrait des -1
+    pos_idx = np.where(dataset["y"] == 1)[0]
+    zero_idx = np.where(dataset["y"] == 0)[0]
+    zero_idx_sampled = np.random.choice(zero_idx, size=len(pos_idx)*10, replace=False)
+    idx = np.concatenate([pos_idx, zero_idx_sampled])
+    np.random.shuffle(idx)
+    
+    X = torch.tensor(dataset["x"][idx]).float().to(device)
+    Y = torch.tensor(dataset["y"][idx, None]).float().to(device)
+
+    u_net = u_neural(X,Y,layers).to(device)
     list_loss = []
-    optimizer = torch.optim.Adam(u_net.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(u_net.parameters(), lr=1e-4)
     bar_train = st.progress(0., text="Training progress")
+    
     for epoch in range(epochs):
         bar_train.progress(epoch/epochs, text="Training progress")
         optimizer.zero_grad()
@@ -293,7 +246,7 @@ def train_NN(dataset_file, network_file, layers=[10]*2,display=True,epochs=2000)
         list_loss.append(loss.item())
         loss.backward()
         optimizer.step()
-#    print("Final f1-score:",-list_loss[-1])
+
     if display:
         fig = plt.figure()
         plt.plot([-l for l in list_loss])
@@ -308,16 +261,87 @@ def train_NN(dataset_file, network_file, layers=[10]*2,display=True,epochs=2000)
     model_scripted.save(network_file) # Save
     return list_loss, fig
 
+def train_kfold_NN(dataset_file, layers=[64,16], epochs=4000):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    with open(dataset_file, 'rb') as o:
+        dataset = pickle.load(o)
+    
+    X = dataset["x"]
+    Y = dataset["y"]
+    I = dataset["i"]
+
+    logo = LeaveOneGroupOut()
+    scores_f1 = []
+
+    for fold, (train_idx, val_idx) in enumerate(logo.split(X, Y, I)):
+        vid = np.unique(I[val_idx])
+        print(f"fold : {fold + 1}\n")
+
+        X_train = X[train_idx]
+        Y_train = Y[train_idx]
+        X_val = torch.tensor(X[val_idx]).float().to(device)
+        Y_val = torch.tensor(Y[val_idx]).float().to(device)
+        
+        pos_idx = np.where(Y_train == 1)[0]
+        zero_idx = np.where(Y_train == 0)[0]
+        zero_idx_sampled = np.random.choice(zero_idx, size=len(pos_idx)*10, replace=False)
+        idx_sub = np.concatenate([pos_idx, zero_idx_sampled])
+        np.random.shuffle(idx_sub)
+        
+        X_train = torch.tensor(X_train[idx_sub]).float().to(device)
+        Y_train = torch.tensor(Y_train[idx_sub, None]).float().to(device)
+        
+        u_net = u_neural(X_train, Y_train, layers).to(device)
+        optimizer = torch.optim.Adam(u_net.parameters(), lr=1e-4)
+
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            loss = u_net.f1_loss()
+            loss.backward()
+            optimizer.step()
+
+        u_net.eval()
+        
+        with torch.no_grad():
+            Y_pred_val = u_net(X_val)
+            
+            Y_pred_binary = (Y_pred_val.cpu().numpy() > 0.5).astype(int).flatten()
+            Y_true_binary = Y_val.cpu().numpy().flatten()
+            
+            Y_pred_clean = remove_short_sequences(Y_pred_binary, 20)
+            
+            y_true = Y_true_binary * (Y_true_binary > 0)
+            y_pred = Y_pred_clean * (Y_pred_clean > 0)
+
+            tp = (y_true * y_pred).sum()
+            tn = ((1 - y_true) * (1 - y_pred)).sum()
+            fp = ((1 - y_true) * y_pred).sum()
+            fn = (y_true * (1 - y_pred)).sum()
+            
+            epsilon = 1e-7
+            precision = tp / (tp + fp + epsilon)
+            recall = tp / (tp + fn + epsilon)
+            
+            fold_f1 = 2 * (precision * recall) / (precision + recall + epsilon)
+            
+            scores_f1.append(fold_f1)
+        print(f"Fold {fold + 1} terminé. F1-Score : {fold_f1:.4f}")
+
+    print(f"Scores par fold : {scores_f1}")
+    print(f"Score F1 Moyen  : {np.mean(scores_f1):.4f}")
+        
+    return scores_f1
 
 def get_detection(sessions, dataset_out, u_net_file):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     x = []
     y = []
     y_score_pred = []
     y_score_true = []
 
     color = {'LH':'red','RH':'orange','LF':'blue','RF':'purple'}
-    u_net = torch.jit.load(u_net_file)
+    u_net = torch.jit.load(u_net_file, map_location=device)
     u_net.eval()
     bar_inference = st.progress(0., text="Inference progress")
     for i,s in enumerate(sessions):
@@ -361,24 +385,32 @@ def get_detection(sessions, dataset_out, u_net_file):
             acc = np.diff(velo,axis=0)/dt
             acc = np.concatenate((acc[0:1,:],acc))
             y0[tp] = {}
-            for en,l in enumerate(mask_holds):
-                dist = mask_holds[l][(p[:,1]/dx).astype(int),(p[:,0]/dy).astype(int)][:,np.newaxis]
-#
-#                print("l:",l,"mask_size:",mask_holds[l].shape, "p1m:", np.max((p[:,1]/dy).astype(int)), "p0m:", np.max((p[:,0]/dy).astype(int)),"p1init:", (p[0,1]/dy).astype(int), "p0init:", (p[0,0]/dy).astype(int) )
-#                dist = mask_holds[en][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis] # changement 16/01
-#                try:
-#                except IndexError:
-#                   print("tp:",tp, "en:",en,"l:",l,"mask_size:",mask_holds[l].shape, "p1m:", np.max((p[:,1]/dy).astype(int)), "p0m:", np.max((p[:,0]/dx).astype(int)),"p1init:", (p[0,1]/dy).astype(int), "p0init:", (p[0,0]/dx).astype(int) )
-#                finally:
-#                    return 0
-                X = torch.tensor(np.concatenate((dist.T,velo.T)).T).float()
+
+            # bloc pour empecher d'avoir un membre sur 2 prises en même temps 
+            proba = np.zeros((n, len(mask_holds)))
+            temp = {} 
+            
+            for en, l in enumerate(mask_holds):
+                dist = mask_holds[l][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis]
+                X = torch.tensor(np.concatenate((dist.T,velo.T)).T).float().to(device)
                 Yout = u_net(X)
-#                print("Size Yout:", Yout.shape)
-                y0[tp][l] = remove_short_sequences((Yout.detach().numpy()>0.5).astype(int),20)
-                x.append(np.concatenate((dist.T,velo.T)).T)
+                proba[:, en] = Yout.detach().cpu().numpy().flatten()
+                temp[l] = np.concatenate((dist.T,velo.T)).T
+            
+            best_i = np.argmax(proba, axis=1)
+            max_proba = np.max(proba, axis=1)
+            best_matrice = np.zeros_like(proba)
+
+            for t in range(n):
+                if max_proba[t] > 0.5:
+                    best_matrice[t, best_i[t]] = 1
+
+            for en, l in enumerate(mask_holds):
+                y0[tp][l] = remove_short_sequences(best_matrice[:, en].astype(int), 20)
+                x.append(temp[l])
                 y.append(y0[tp][l].flatten())
-                
                 detection_out[tp][l] = y0[tp][l].flatten().copy()
+                
                 if fig is not None:
                     plt.subplot(len(mask_holds),1,en+1)
                     plt.plot(time,y0[tp][l], c=color[tp], linestyle='solid', label=tp)
@@ -404,23 +436,15 @@ def get_detection(sessions, dataset_out, u_net_file):
                 y_true = y_true * (y_true>0) # Mainly in case of an annotation issue
                 y_pred = y_pred * (y_pred>0)
                 
-#               print("y_true shape",y_true.shape)
-#               print("y_pred shape",y_pred.shape)
-                
                 tp = (y_true * y_pred).sum()
-#                print("tp",tp)
                 tn = ((1 - y_true) * (1 - y_pred)).sum()
-#                print("tn",tn)
                 fp = ((1 - y_true) * y_pred).sum()
-#                print("fp",fp)
                 fn = (y_true * (1 - y_pred)).sum()
- #               print("fn",fn)
                 epsilon = 1e-7
                 precision = tp / (tp + fp + epsilon)
                 recall = tp / (tp + fn + epsilon)
                 f1 = 2* (precision*recall) / (precision + recall + epsilon)
                 plt.title(f"Final F1-score: {f1:.2f}")
-#                print("Score is",f1)
             plt.subplot(len(mask_holds),1,len(mask_holds))
             plt.xlabel("Time (s)")
 
@@ -454,13 +478,9 @@ def get_detection(sessions, dataset_out, u_net_file):
                 
     
     tp = (y_true * y_pred).sum()
-#    print("tp",tp)
     tn = ((1 - y_true) * (1 - y_pred)).sum()
-#    print("tn",tn)
     fp = ((1 - y_true) * y_pred).sum()
-#    print("fp",fp)
     fn = (y_true * (1 - y_pred)).sum()
-#    print("fn",fn)
     epsilon = 1e-7
     precision = tp / (tp + fp + epsilon)
     recall = tp / (tp + fn + epsilon)

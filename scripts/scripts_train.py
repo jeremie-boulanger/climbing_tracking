@@ -349,6 +349,7 @@ def get_detection(sessions, dataset_out, u_net_file):
         # Perform inference
         p = s["position"]
         det = s["prediction"]        
+        xlsx = s["prediction .xlsx"]
         h = s["mask"]
         list_pos, dx, dy = get_pos(p.strip())
         time = list_pos["time"]
@@ -375,6 +376,9 @@ def get_detection(sessions, dataset_out, u_net_file):
             plt.tight_layout()
 
         detection_out = {"Time":time}
+        
+        xlsx_data = {"Time (s)": time}
+
         for tp in ["RH","LH","RF","LF"]:
             detection_out[tp] = {}
             p = list_pos[tp]     
@@ -410,6 +414,7 @@ def get_detection(sessions, dataset_out, u_net_file):
                 x.append(temp[l])
                 y.append(y0[tp][l].flatten())
                 detection_out[tp][l] = y0[tp][l].flatten().copy()
+                xlsx_data[f"{tp}_hold{l}_detection"] = y0[tp][l].flatten().copy()
                 
                 if fig is not None:
                     plt.subplot(len(mask_holds),1,en+1)
@@ -423,7 +428,7 @@ def get_detection(sessions, dataset_out, u_net_file):
                     y_pred.append(y0[tp][l].flatten())
                     y_score_true.append(annot[tp][l].flatten())
                     y_score_pred.append(y0[tp][l].flatten())
-
+                    xlsx_data[f"{tp}_hold{l}_annotation"] = annot[tp][l].flatten().copy()
         
         if fig is not None:
             plt.subplot(len(mask_holds),1,1)
@@ -450,12 +455,10 @@ def get_detection(sessions, dataset_out, u_net_file):
 
             os.makedirs(os.path.dirname(fig), exist_ok=True)
             plt.savefig(fig)
-            # Here, just to plot the aligned sequence, just used for debugging
-#            plt.figure()
-#            plt.plot(y_true)
-#            plt.plot(y_pred)
-#            plt.savefig(fig.replace('.png','_.png'))
 
+        df = pd.DataFrame(xlsx_data)
+        os.makedirs(os.path.dirname(xlsx), exist_ok=True)
+        df.to_excel(xlsx)
 
     bar_inference.progress(1., text="Inference progress")
 

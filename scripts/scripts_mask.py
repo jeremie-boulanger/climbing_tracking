@@ -1,26 +1,38 @@
 import numpy as np
 import cv2
 import os
+from lightglue import LightGlue, SuperPoint
+from lightglue.utils import load_image, rbd
+import torch
 
-def transfo(pts_src, pts_dst) :
-    """Calculate Homography"""
+def get_homography(image_destination, image_source):
+    """
+    Calculate the homography matrix between two images using SuperPoint and LightGlue.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    matcher = LightGlue(features='superpoint').eval().to(device)
 
-    return cv2.getPerspectiveTransform(pts_src, pts_dst)
+    image0 = load_image(image_source).to(device)
+    image1 = load_image(image_destination).to(device)
 
-def transfo_mask(h, src, dst, image_file) : 
-    """Warp source image to destination based on homography"""
+    with torch.no_grad():
+        feats0 = extractor.extract(image0)
+        feats1 = extractor.extract(image1)
+        matches01 = matcher({'image0': feats0, 'image1': feats1})
 
-    img_src = cv2.imread(src)
-    img_dst = cv2.imread(dst)
-    output = cv2.warpPerspective(img_src, h, (img_dst.shape[1],img_dst.shape[0]))
-    os.makedirs(os.path.dirname(image_file), exist_ok=True)
-    cv2.imwrite(image_file, output) 
-    return 
+    feats0, feats1, matches01 = [rbd(x) for x in [feats0, feats1, matches01]] 
+    matches = matches01['matches']
+    points_src = feats0['keypoints'][matches[..., 0]].cpu().numpy()
+    points_dst = feats1['keypoints'][matches[..., 1]].cpu().numpy()
+    h, mask = cv2.findHomography(points_src, points_dst, cv2.RANSAC, 5.0)
+    
+    return h
 
-def transfo_mask_folder(pts_src, pts_dst, mask_folder, image_destination, output_folder):
+def transfo_mask_folder(mask_folder, image_destination, image_source, output_folder):
     """Apply transform to all masks"""
 
-    h = transfo(pts_src, pts_dst)
+    h = get_homography(image_destination, image_source)
  
     img_dst = cv2.imread(image_destination)
     if img_dst is None:
@@ -35,10 +47,10 @@ def transfo_mask_folder(pts_src, pts_dst, mask_folder, image_destination, output
  
     processed = []
     for mask in mask_files:
-        src_path = os.path.join(mask_folder, mask)
-        img_src = cv2.imread(src_path)
+        pts_src = os.path.join(mask_folder, mask)
+        img_src = cv2.imread(pts_src)
         if img_src is None:
-            print(f"Cannot read: {src_path}")
+            print(f"Cannot read: {pts_src}")
             continue
         output = cv2.warpPerspective(img_src, h, (img_dst.shape[1], img_dst.shape[0]))
         out_path = os.path.join(output_folder, mask)

@@ -114,12 +114,14 @@ with col_test:
         "annotation": "./data/annotation/Seq21_annotation.xlsx",
         "mask": "./data/holds/",
         "prediction": "./data/inference/Seq21.pickle",
+        "prediction .xlsx": "./data/inference/Seq21.xlsx",
         "plot": "./data/inference/Seq21.png"},
 
         {"position": "./data/tracking/Seq22_tracking.pickle",
         "mask": "./data/holds/",
-        "prediction": "./data/inference/Seq22.pickle",
         "annotation": "./data/annotation/Seq22_annotation.xlsx",
+        "prediction": "./data/inference/Seq22.pickle",
+        "prediction .xlsx": "./data/inference/Seq22.xlsx",
         "plot": "./data/inference/Seq22.png"}
         ],
     "dataset": "./data/dataset_test.pickle",

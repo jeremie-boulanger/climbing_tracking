@@ -169,14 +169,14 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
 
     return list_detection, [tracking_person2], heatmap_acc
   
-def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
+def mediapipe_tracking(video_file, tracking_yolo, tracking_initial, MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"):
     with open(tracking_yolo,'rb') as o:
         track_yolo = pickle.load(o)
     list_detection = track_yolo['list_detection']
     list_tracking_person = track_yolo['tracking_person']
 
     # ---------- MediaPipe PoseLandmarker ----------
-    MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"
+    
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"MediaPipe model not found: {MODEL_PATH}")
 

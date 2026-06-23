@@ -10,3 +10,4 @@ torch
 mediapipe
 ultralytics
 lapx
+git+https://github.com/cvg/LightGlue.git

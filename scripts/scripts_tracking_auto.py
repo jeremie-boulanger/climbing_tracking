@@ -183,7 +183,11 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:
         track_yolo = pickle.load(o)
     list_detection = track_yolo['list_detection']
-    list_tracking_person = track_yolo['tracking_person'] 
+    list_tracking_person = track_yolo['tracking_person']
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    MODEL_PATH = os.path.join(parent_dir, "mediapipe_models", "pose_landmarker_heavy.task")
 
     # ---------- MediaPipe PoseLandmarker ----------
     MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"

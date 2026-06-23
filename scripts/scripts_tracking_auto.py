@@ -259,15 +259,15 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
     width  = list_pose[0]['size'][0]
     height = list_pose[0]['size'][1]    
 
-    time = np.array([l['timestamp'] for l in list_pose])
+    time = np.array([l['timestamp'] for l in list_pose]) / 1000.
     dt = np.median(np.diff(time))
     time2=np.arange(time[0],time[-1]+dt,dt)
     time2[-1] = min(time2[-1],time[-1])
-    b,a = butter(3,w_c,btype='low')
+    b,a = butter(3,w_c,btype='low', fs = 1.0 / dt)
 
 
     list_body_indexes = {"H": [23,24], "LH": [15,21,19,17], "RH": [16,22,20,18], "LF": [27,29,31], "RF": [28,30,32]}
-    data = {'Time (s)':time2/1000.}
+    data = {'Time (s)':time2}
 
 
     for l in list_body_indexes:
@@ -308,8 +308,8 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
         pos[:,1] *= dy
         v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
         v = np.insert(v,0,v[0])
-        data[l+"x (m)"] = np.clip(pos[:,0],0,width-1)
-        data[l+"y (m)"] = np.clip(pos[:,1],0,height-1)
+        data[l+"x (m)"] = pos[:,0]
+        data[l+"y (m)"] = pos[:,1]
         data[l+"v (m/s)"] = v[:]
     df = pd.DataFrame(data)
     os.makedirs(os.path.dirname(xlsx_tracking_file), exist_ok=True)

@@ -1,9 +1,10 @@
 data/
 myenv/
-mediapipe_models/
+models/mediapipe_models/
 *.pt
 *.ipynb
 
 .README.txt.swp
 .ipynb_checkpoints/
 __pycache__/
+models/dwpose_models/

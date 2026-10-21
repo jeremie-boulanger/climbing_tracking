@@ -186,7 +186,7 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     list_tracking_person = track_yolo['tracking_person'] 
 
     # ---------- MediaPipe PoseLandmarker ----------
-    MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"
+    MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "mediapipe_models", "pose_landmarker_heavy.task")
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"MediaPipe model not found: {MODEL_PATH}")
 

@@ -10,3 +10,5 @@ torch
 mediapipe
 ultralytics
 lapx
+onnxruntime
+huggingface_hub

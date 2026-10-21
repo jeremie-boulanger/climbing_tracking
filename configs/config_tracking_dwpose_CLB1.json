@@ -1,0 +1,43 @@
+{
+    "session": [
+        {
+            "title": "CL_B1E1",
+            "video": "./data/videos/CL_B1E1_h265_2.mp4",
+            "tracking_dwpose": "./data/tracking_dwpose/CL_B1E1_pose.pickle",
+            "tracking_pickle": "./data/tracking_dwpose/CL_B1E1_tracking.pickle",
+            "tracking_xlsx": "./data/tracking_dwpose/CL_B1E1_tracking.xlsx",
+            "wall image": "./data/tracking_dwpose/CL_B1E1_wall_image.png",
+            "video_tracking": "./data/tracking_dwpose/CL_B1E1_tracking.mp4",
+            "pixel size X (m/p)": 0.00483,
+            "pixel size Y (m/p)": 0.00483,
+            "frequency cut-off": 0.1,
+            "delta t": 0.02
+        },
+        {
+            "title": "CL_B1E3",
+            "video": "./data/videos/CL_B1E3_h265_2.mp4",
+            "tracking_dwpose": "./data/tracking_dwpose/CL_B1E3_pose.pickle",
+            "tracking_pickle": "./data/tracking_dwpose/CL_B1E3_tracking.pickle",
+            "tracking_xlsx": "./data/tracking_dwpose/CL_B1E3_tracking.xlsx",
+            "wall image": "./data/tracking_dwpose/CL_B1E3_wall_image.png",
+            "video_tracking": "./data/tracking_dwpose/CL_B1E3_tracking.mp4",
+            "pixel size X (m/p)": 0.00483,
+            "pixel size Y (m/p)": 0.00483,
+            "frequency cut-off": 0.1,
+            "delta t": 0.02
+        },
+        {
+            "title": "CL_B1E4",
+            "video": "./data/videos/CL_B1E4_h265_2.mp4",
+            "tracking_dwpose": "./data/tracking_dwpose/CL_B1E4_pose.pickle",
+            "tracking_pickle": "./data/tracking_dwpose/CL_B1E4_tracking.pickle",
+            "tracking_xlsx": "./data/tracking_dwpose/CL_B1E4_tracking.xlsx",
+            "wall image": "./data/tracking_dwpose/CL_B1E4_wall_image.png",
+            "video_tracking": "./data/tracking_dwpose/CL_B1E4_tracking.mp4",
+            "pixel size X (m/p)": 0.00483,
+            "pixel size Y (m/p)": 0.00483,
+            "frequency cut-off": 0.1,
+            "delta t": 0.02
+        }
+    ]
+}

@@ -138,7 +138,7 @@ with col_yolo:
                                         title=t,
                                         out_image_name=current_image_tracking,
                                         heatmap_image_name=current_heatmap,
-                                        model_name='yolov8x-pose.pt',
+                                        model_name=YOLO_MODEL,
                                         display=False,
                                         stream=True
                                     )
@@ -216,7 +216,7 @@ with col_yolo:
                     title=st.session_state.title,
                     out_image_name=st.session_state.image_tracking,
                     heatmap_image_name=st.session_state.heatmap_tracking,
-                    model_name='yolov8x-pose.pt',
+                    model_name=YOLO_MODEL,
                     display=False,
                     stream=True
                 )

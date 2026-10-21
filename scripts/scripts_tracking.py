@@ -17,6 +17,32 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+YOLO_MODEL = os.path.join(PROJECT_ROOT, "models", "yolov8x-pose.pt")
+
+def rank_climber_tracks(list_detection, min_frames=100):
+    """Rank the person tracks by the highest point reached on the wall
+    (smallest box-top y, best first).
+
+    Returns (ranked_ids, stats). Tracks shorter than min_frames frames
+    are ignored. The climber can leave the camera view and be
+    re-detected later under a NEW track id, so every long-enough track
+    is kept and ranked, not just the best one."""
+    tracks = {}
+    for l in list_detection:
+        for j, idx in enumerate(l['id']):
+            b = l['boxes'][j]
+            t = tracks.setdefault(idx, {'n': 0, 'top_y': np.inf})
+            t['n'] += 1
+            if b[1] < t['top_y']:
+                t['top_y'] = b[1]     # smallest y = highest point
+    cand = [(i, t) for i, t in tracks.items() if t['n'] >= min_frames]
+    cand.sort(key=lambda it: it[1]['top_y'])      # highest first
+    ranked = [i for i, t in cand]
+    stats = {i: {'frames': t['n'],
+                 'top_y': round(float(t['top_y']))} for i, t in cand}
+    return ranked, stats
+
 def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_name=None, model_name='yolov8l.pt', title=None, display=True, stream=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cap = cv2.VideoCapture(video_file)
@@ -51,7 +77,9 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
 
         try:
             rb = r.boxes.xyxy.cpu().numpy()
-            rid = r.boxes.id.int().cpu().tolist()
+            # id is None when the tracker lost the person: keep an empty
+            # entry so list_detection stays aligned with the video frames
+            rid = r.boxes.id.int().cpu().tolist() if r.boxes.id is not None else []
             rt = (i / fps) * 1000
             kp = r.keypoints.cpu().numpy()
             list_detection.append({'timestamp': rt, 'boxes': rb, 'id': rid, 'keypoints': kp})
@@ -73,28 +101,31 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
         for l2 in l['id']:
             l3.append(l2)
 
+    # every track long enough, ranked by highest point reached: the
+    # climber usually comes first, but if (s)he leaves the camera view
+    # and is re-detected under a new id, the fragments are all in the
+    # list — the MediaPipe pass tracks them all
+    tracking_person, track_stats = rank_climber_tracks(list_detection)
+    st.write("Climber candidates (highest first): "
+             f"{[(i, track_stats[i]) for i in tracking_person]}")
+
     if display:
         fig, ax = plt.subplots(dpi=100)
         ax.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
-        m = 0
-        tracking_person2 = -1
         for idx in set(l3):
-            tracking_person = idx
+            tracking_person_loop = idx
             lx, ly, lt = [], [], []
             for l in list_detection:
                 b = l['boxes']
                 i = l['id']
                 t = l['timestamp']
-                if tracking_person in i:
-                    id_box = i.index(tracking_person)
+                if tracking_person_loop in i:
+                    id_box = i.index(tracking_person_loop)
                     lx.append((b[id_box,0]+b[id_box,2])/2)
                     ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
                     lt.append(t)
             if len(lx) > 100:
                 ax.plot(lx, ly, label=str(idx))
-                if max(ly) > m:
-                    m = max(ly)
-                    tracking_person2 = tracking_person
         ax.legend()
         st.pyplot(fig)
         if out_image_name:
@@ -103,31 +134,26 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
     else:
         myfig = plt.figure(dpi=100)
         plt.imshow(cv2.cvtColor(frame0,cv2.COLOR_BGR2RGB))
-        m = 0
-        tracking_person2 = -1
         for idx in set(l3):
-            tracking_person = idx
+            tracking_person_loop = idx
             lx, ly, lt = [], [], []
             for l in list_detection:
                 b = l['boxes']
                 i = l['id']
                 t = l['timestamp']
-                if tracking_person in i:
-                    id_box = i.index(tracking_person)
+                if tracking_person_loop in i:
+                    id_box = i.index(tracking_person_loop)
                     lx.append((b[id_box,0]+b[id_box,2])/2)
                     ly.append(frame_height-(b[id_box,1]+b[id_box,3])/2)
                     lt.append(t)
             if len(lx) > 100:
                 plt.plot(lx, [frame_height - y for y in ly], label=str(idx))
-                if max(ly) > m:
-                    m = max(ly)
-                    tracking_person2 = tracking_person
         plt.legend()
         plt.xticks([])
         plt.yticks([])
         plt.tight_layout()
 
-        plt.title((title or "") + " tracking climber:" + str(tracking_person2))
+        plt.title((title or "") + " tracking climbers:" + ",".join(map(str, tracking_person)))
         if out_image_name:
             os.makedirs(os.path.dirname(out_image_name), exist_ok=True)
             plt.savefig(out_image_name)
@@ -165,9 +191,9 @@ def yolo_tracking(video_file, tracking_yolo, out_image_name=None, heatmap_image_
     # --- SAUVEGARDE PICKLE ---
     os.makedirs(os.path.dirname(tracking_yolo), exist_ok=True)
     with open(tracking_yolo, 'wb') as handle:
-        pickle.dump({'list_detection': list_detection, 'tracking_person':[tracking_person2]}, handle)
+        pickle.dump({'list_detection': list_detection, 'tracking_person':tracking_person}, handle)
 
-    return list_detection, [tracking_person2], heatmap_acc
+    return list_detection, tracking_person, heatmap_acc
   
 def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     with open(tracking_yolo,'rb') as o:
@@ -176,7 +202,7 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
     list_tracking_person = track_yolo['tracking_person']
 
     # ---------- MediaPipe PoseLandmarker ----------
-    MODEL_PATH = "./mediapipe_models/pose_landmarker_heavy.task"
+    MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "mediapipe_models", "pose_landmarker_heavy.task")
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"MediaPipe model not found: {MODEL_PATH}")
 
@@ -237,6 +263,9 @@ def mediapipe_tracking(video_file, tracking_yolo, tracking_initial):
 
     save = True # Saving the tracking
     if save:
+        # several climber tracks (fragments when the climber leaves the
+        # camera view) may interleave: sort by time before saving
+        list_pose.sort(key=lambda e: e['timestamp'])
         os.makedirs(os.path.dirname(tracking_initial), exist_ok=True)
         with open(tracking_initial, 'wb') as handle:
             pickle.dump(list_pose, handle)
@@ -301,8 +330,8 @@ def extract_tracking(tracking_initial, pickle_tracking_file, xlsx_tracking_file,
         pos[:,1] *= dy
         v = np.linalg.norm(np.diff(pos,axis=0),axis=1)/dt
         v = np.insert(v,0,v[0])
-        data[l+"x (m)"] = np.clip(pos[:,0],0,width-1)
-        data[l+"y (m)"] = np.clip(pos[:,1],0,height-1)
+        data[l+"x (m)"] = np.clip(pos[:,0],0,(width-1)*dx)
+        data[l+"y (m)"] = np.clip(pos[:,1],0,(height-1)*dy)
         data[l+"v (m/s)"] = v[:]
     df = pd.DataFrame(data)
     os.makedirs(os.path.dirname(xlsx_tracking_file), exist_ok=True)

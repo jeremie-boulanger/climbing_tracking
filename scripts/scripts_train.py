@@ -2,20 +2,53 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 import pickle
-import sys
-import re
-import pandas as pd
 import os
+import json
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch import Tensor
 import streamlit as st
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import f1_score
-from sklearn.model_selection import LeaveOneGroupOut
 
-def get_annotation(annotation_file, n, list_holds, time):
-    # Load annotation file
+# ============================================================
+# Configuration
+# ============================================================
+LIMBS = ['LH', 'RH', 'LF', 'RF']
+
+# post-processing
+MIN_LEN_FRAMES = 3     # ~0.06 s at 50 Hz (was 20 = 0.4 s, killed real
+                       # 0.08-0.2 s contacts)
+ON_THR = 0.6           # hysteresis: turn ON above this
+OFF_THR = 0.3          # hysteresis: turn OFF below this
+MAX_DIST_M = 0.15      # distance gate: no contact possible beyond this
+
+# training
+NEG_POS_RATIO = 10
+LR = 1e-3
+EPOCHS_DEFAULT = 4000
+VAL_FRACTION = 0.2     # last block of each series held out for tuning
+
+
+# ============================================================
+# Annotations (validated state machine)
+# ============================================================
+def get_annotation(annotation_file, n, list_holds, time, verbose=True):
+    """Binary on/off series per (limb, hold) from A/D events.
+
+    Validations (each issue is reported instead of silently corrupting
+    the labels):
+    - events are processed in TIME order (annotation rows can be
+      unsorted; a 'D' beyond the video end processed after a later 'A'
+      used to leave the hold occupied until the end of the session);
+    - 'A' on hold '-1' (unlabeled support) closes the hold that limb
+      was on;
+    - 'A' while the limb is already on another hold -> the previous
+      hold is implicitly closed (a limb can be on only one hold;
+      missing 'D' events used to produce phantom occupations of up
+      to 49% of a session);
+    - 'D' without a matching 'A' -> skipped;
+    - holds not present in the mask folder -> skipped;
+    - still occupied at the end -> closed at the last frame.
+    """
     if annotation_file.endswith('.xlsx'):
         annotation = pd.read_excel(annotation_file)
     elif annotation_file.endswith('.csv'):
@@ -23,545 +56,641 @@ def get_annotation(annotation_file, n, list_holds, time):
     else:
         raise ValueError("Unsupported file format. Use .csv or .xlsx.")
 
-    # Convert time to seconds if in MM:SS format
-    time_annotation = annotation["Time"]
-    if isinstance(time_annotation[0], str) and ':' in time_annotation[0]:
-        time_annotation = [int(t.split(":")[0])*60 + float(t.split(":")[1]) for t in time_annotation]
+    def _parse_t(t):
+        t = str(t).strip()
+        if ':' in t:                     # MM:SS.SS or HH:MM:SS.SS
+            head, s = t.rsplit(':', 1)
+            if ':' in head:              # HH:MM:SS.SS
+                h, m = head.split(':')
+                return int(float(h)) * 3600 + int(float(m)) * 60 + float(s)
+            return int(float(head)) * 60 + float(s)
+        return float(t)                  # bare seconds, e.g. "0"
 
-    # Initialize output structure
-    limbs = ['LH', 'RH', 'LF', 'RF']
-    annotation_ts = {limb: {hold: np.zeros(n) for hold in list_holds} for limb in limbs}
-    hold_states = {limb: {hold: 0 for hold in list_holds} for limb in limbs}
+    time_annotation = [_parse_t(t) for t in annotation["Time"]]
+    # Rows are processed in TIME order: annotation files are not always
+    # sorted, and an out-of-range 'D' processed after a later-in-time 'A'
+    # used to leave the hold occupied until the end of the session.
+    order = np.argsort(time_annotation, kind="stable")
+    rows = [(time_annotation[k], k, annotation.iloc[k]) for k in order]
 
-    # Process each annotation
-    for _, row in annotation.iterrows():
+    annotation_ts = {limb: {hold: np.zeros(n) for hold in list_holds} for limb in LIMBS}
+    hold_states = {limb: {hold: 0 for hold in list_holds} for limb in LIMBS}
+    warnings = []
+
+    prev_t = -np.inf
+    for t, k, row in rows:
         limb = row["Member parts"]
-        hold_id = str(row["Holds ID"])
+        hold_id = str(row["Holds ID"]).strip()
         action = row["Action"]
 
-        if limb in limbs and hold_id in list_holds and hold_id != "-1":
-            i = np.argmin(np.abs(time - time_annotation[_]))
-            if action == "A" and hold_states[limb][hold_id] == 0:
-                annotation_ts[limb][hold_id][i] = 1
-                hold_states[limb][hold_id] = 1
-            elif action == "D" and hold_states[limb][hold_id] == 1:
-                annotation_ts[limb][hold_id][i] = -1
-                hold_states[limb][hold_id] = 0
+        if t < prev_t:
+            warnings.append(f"Row {k}: time {t} not increasing (previous "
+                            f"{prev_t}) — check the CSV.")
+        prev_t = t
 
-    # Ensure all holds end in a "not occupied" state
+        if limb not in LIMBS:
+            continue
+        if hold_id == "-1":
+            # 'A' on -1 = the limb moved to unlabeled support: whatever
+            # hold that limb was on is released.
+            if action == "A":
+                for h2, st in hold_states[limb].items():
+                    if st == 1:
+                        i = np.argmin(np.abs(time - t))
+                        annotation_ts[limb][h2][i] = -1
+                        hold_states[limb][h2] = 0
+                        warnings.append(f"Row {k}: {limb} moved to unlabeled "
+                                        f"support at t={t}s — closing {h2} "
+                                        f"(missing 'D').")
+            continue
+        if hold_id not in list_holds:
+            if verbose:
+                warnings.append(f"Row {k}: hold '{hold_id}' not in mask "
+                                f"folder — skipped.")
+            continue
+
+        i = np.argmin(np.abs(time - t))
+        if action == "A" and hold_states[limb][hold_id] == 0:
+            for h2, st in hold_states[limb].items():  # implicit close
+                if st == 1:
+                    annotation_ts[limb][h2][i] = -1
+                    hold_states[limb][h2] = 0
+                    warnings.append(f"Row {k}: {limb} takes {hold_id} at "
+                                    f"t={t}s while still on {h2} — closing "
+                                    f"{h2} (missing 'D').")
+            annotation_ts[limb][hold_id][i] = 1
+            hold_states[limb][hold_id] = 1
+        elif action == "D" and hold_states[limb][hold_id] == 1:
+            annotation_ts[limb][hold_id][i] = -1
+            hold_states[limb][hold_id] = 0
+        else:
+            warnings.append(f"Row {k}: unmatched {action} on {limb}/"
+                            f"{hold_id} at t={t}s — skipped.")
+
     for limb in annotation_ts:
         for hold in annotation_ts[limb]:
             if hold_states[limb][hold] == 1:
                 annotation_ts[limb][hold][-1] = -1
+                warnings.append(f"{limb}/{hold}: still occupied at the end "
+                                f"— closing at the last frame.")
 
-    # convertit les A/D en binaire 
+    for w in warnings:
+        print(f"[annotation {os.path.basename(annotation_file)}] {w}")
+
+    # A/D events -> binary occupancy
     for limb in annotation_ts:
         for hold in annotation_ts[limb]:
-            annotation_ts[limb][hold] = np.cumsum(annotation_ts[limb][hold])
-
+            annotation_ts[limb][hold] = np.clip(
+                np.cumsum(annotation_ts[limb][hold]), 0, 1)
     return annotation_ts
 
-def get_pos(tracking_file):
-    pos = {}
-    with open(tracking_file,'rb') as o:
-        list_pos = pickle.load(o)
-    for tp in ["RH","LH","RF","LF","H"]:
-        time = list_pos["Time (s)"]
-        n = time.shape[0]
-        dt = np.median(np.diff(time))
 
-        p = np.zeros((n,2))
-        p[:,0] = list_pos[tp+"x (pix)"]
-        p[:,1] = list_pos[tp+"y (pix)"]
-        pos[tp] = p.copy()
-    pos['time'] = time.copy()
-    return pos, list_pos["dx"], list_pos["dy"]
-    
+# ============================================================
+# Tracking / masks / features
+# ============================================================
+def get_pos(tracking_file):
+    """Per-limb pixel positions + visibility + time from the tracking
+    pickle. Visibility is copied through (needed as a feature)."""
+    with open(tracking_file, 'rb') as o:
+        data = pickle.load(o)
+    pos = {}
+    for tp in ["RH", "LH", "RF", "LF", "H"]:
+        n = data["Time (s)"].shape[0]
+        p = np.zeros((n, 2))
+        p[:, 0] = data[tp + "x (pix)"]
+        p[:, 1] = data[tp + "y (pix)"]
+        pos[tp] = p
+        key = tp + " visib"
+        pos[key] = (np.asarray(data[key], dtype=float).copy()
+                    if key in data else np.zeros(n))
+    pos['time'] = data["Time (s)"].copy()
+    return pos, data["dx"], data["dy"]
+
 
 def get_mask_holds(folder_holds):
+    """Load hold masks -> distance transforms (0 inside the hold)."""
     mask_holds = {}
-    for f in os.listdir(folder_holds):  
+    for f in os.listdir(folder_holds):
         if "hold_" in f:
-            h = f.split('_')[1].replace(".png","")
-            ret, thresh = cv2.threshold(cv2.cvtColor(cv2.imread(os.path.join(folder_holds,f)), cv2.COLOR_BGR2GRAY), 127, 1, cv2.THRESH_BINARY)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+            h = f.split('_')[1].replace(".png", "")
+            img = cv2.imread(os.path.join(folder_holds, f), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            thresh = cv2.threshold(img, 127, 1, cv2.THRESH_BINARY)[1]
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-            dist = cv2.distanceTransform(1-thresh, cv2.DIST_L2, 0)
-            mask_holds[h] = dist.copy()
+            mask_holds[h] = cv2.distanceTransform(1 - thresh, cv2.DIST_L2, 0)
+    if mask_holds:
+        h0 = list(mask_holds.keys())[0]
+        print(f"[masks] {len(mask_holds)} holds, mask size "
+              f"{mask_holds[h0].shape[1]}x{mask_holds[h0].shape[0]} (WxH) — "
+              f"must match the video frames for the geometry to be right")
     return mask_holds
-    
-def get_dataset(sessions, dataset_file):
 
-    x = []
-    y = []
-    m = []
-    i = []
+
+def get_annotation_hold_ids(annotation_file):
+    """Hold IDs referenced by an annotation file (strings, no '-1')."""
+    if annotation_file.endswith('.xlsx'):
+        annotation = pd.read_excel(annotation_file)
+    elif annotation_file.endswith('.csv'):
+        annotation = pd.read_csv(annotation_file)
+    else:
+        raise ValueError("Unsupported file format. Use .csv or .xlsx.")
+    ids = []
+    for h in annotation["Holds ID"].astype(str):
+        h = h.strip()
+        if h not in ids and h not in ("-1", "nan", ""):
+            ids.append(h)
+    return ids
+
+
+def build_aligned_masks(sessions, mask_out, radius_min=18, radius_max=40,
+                        margin=8, verbose=True):
+    """Rebuild hold masks at the TRUE hold locations, from the data.
+
+    Hand-drawn masks can be misaligned with the video frames (drawn on
+    another view, resized image, wrong session...). The tracked limb
+    positions during ANNOTATED contacts give the true hold locations in
+    video pixels (the tracking itself is verified against the frames),
+    so a mask built there matches the geometry the labels describe.
+
+    For each hold ID found in the annotations, contact positions are
+    pooled across the given sessions and limbs; the mask is a disk
+    centred on the median position, radius = p90 + margin (clamped),
+    written to <mask_out>/hold_<id>.png. Point the 'mask' field of the
+    session configs at <mask_out> afterwards.
+
+    Returns {hold: (cx, cy, radius, n_contact_frames)}.
+    """
+    pooled = {}        # hold -> list of (n,2) position arrays
+    per_session = {}   # hold -> {session index: (center, n)}
+    size = None
     for idx, s in enumerate(sessions):
-        p = s["position"]
-        a = s["annotation"]
-        h = s["mask"]
-        list_pos, dx, dy = get_pos(p.strip())
-        time = list_pos["time"]
-        dt = np.median(np.diff(time))
-        mask_holds = get_mask_holds(h.strip())
+        list_pos, dx, dy = get_pos(s["position"].strip())
+        time = list_pos['time']
         n = time.shape[0]
-        annot = get_annotation(a.strip(),n, mask_holds, time)
-        for tp in ["RH","LH","RF","LF"]:
-            p = list_pos[tp]
-            p[:,0] = p[:,0]*dx
-            p[:,1] = p[:,1]*dy
-            velo = np.diff(p,axis=0)/dt
-            velo = np.concatenate((velo[0:1,:],velo))
-            acc = np.diff(velo,axis=0)/dt
-            acc = np.concatenate((acc[0:1,:],acc))
+
+        if size is None and s.get("video"):
+            cap = cv2.VideoCapture(s["video"].strip())
+            if cap.isOpened():
+                size = (int(cap.get(4)), int(cap.get(3)))  # (h, w)
+            cap.release()
+
+        hold_ids = get_annotation_hold_ids(s["annotation"].strip())
+        annot = get_annotation(s["annotation"].strip(), n, hold_ids, time)
+        for hold in hold_ids:
+            pts = []
+            for tp in LIMBS:
+                occ = annot[tp].get(hold)
+                if occ is None:
+                    continue
+                sel = occ > 0
+                if sel.any():
+                    pts.append(list_pos[tp][sel])
+            if not pts:
+                continue
+            pts = np.concatenate(pts)
+            pooled.setdefault(hold, []).append(pts)
+            per_session.setdefault(hold, {})[idx] = (np.median(pts, axis=0),
+                                                     len(pts))
+
+    if size is None:
+        for s in sessions:
+            folder = s.get("mask", "").strip()
+            if os.path.isdir(folder):
+                for f in os.listdir(folder):
+                    if "hold_" in f:
+                        img = cv2.imread(os.path.join(folder, f),
+                                         cv2.IMREAD_GRAYSCALE)
+                        if img is not None:
+                            size = img.shape[:2]
+                            break
+            if size is not None:
+                break
+    if size is None:
+        size = (1080, 1920)
+
+    os.makedirs(mask_out, exist_ok=True)
+    info = {}
+    for hold, pts_list in pooled.items():
+        pts = np.concatenate(pts_list)
+        center = np.median(pts, axis=0)
+        for idx, (c, nf) in per_session.get(hold, {}).items():
+            if np.linalg.norm(c - center) > 60:
+                print(f"[masks] WARNING: hold {hold} in session {idx} is "
+                      f"at ({c[0]:.0f},{c[1]:.0f}) but the pooled center "
+                      f"is ({center[0]:.0f},{center[1]:.0f}) — different "
+                      f"camera? Split the sessions and rebuild per camera.")
+        d = np.linalg.norm(pts - center, axis=1)
+        r = int(np.clip(np.percentile(d, 90) + margin,
+                        radius_min, radius_max))
+        img = np.zeros(size, dtype=np.uint8)
+        cv2.circle(img, (int(round(center[0])), int(round(center[1]))),
+                   r, 255, -1)
+        out = os.path.join(mask_out, f"hold_{hold}.png")
+        cv2.imwrite(out, img)
+        info[hold] = (center[0], center[1], r, len(pts))
+        if verbose:
+            print(f"[masks] hold {hold}: center ({center[0]:.0f},"
+                  f"{center[1]:.0f}) radius {r}px "
+                  f"from {len(pts)} contact frames -> {out}")
+    return info
+
+
+def get_features(list_pos, tp, mask_holds, dx, dy):
+    """Features per (limb, hold): [dist_m, vx, vy, speed, |acc|, visib].
+    All in consistent units (meters, m/s); z-scored by the network."""
+    time = list_pos['time']
+    n = time.shape[0]
+    dt = np.median(np.diff(time))
+
+    p = list_pos[tp]                       # pixels
+    p_m = p.copy()
+    p_m[:, 0] *= float(np.asarray(dx).ravel()[0])
+    p_m[:, 1] *= float(np.asarray(dy).ravel()[0])
+    visib = list_pos[tp + " visib"]
+
+    velo = np.diff(p_m, axis=0) / dt
+    velo = np.concatenate((velo[0:1, :], velo))
+    speed = np.linalg.norm(velo, axis=1, keepdims=True)
+    acc = np.diff(velo, axis=0) / dt
+    acc = np.concatenate((acc[0:1, :], acc))
+    acc_mag = np.linalg.norm(acc, axis=1, keepdims=True)
+
+    feat = {}
+    for l in mask_holds:
+        img = mask_holds[l]
+        iy = np.clip(p[:, 1].astype(int), 0, img.shape[0] - 1)
+        ix = np.clip(p[:, 0].astype(int), 0, img.shape[1] - 1)
+        dist_m = img[iy, ix][:, np.newaxis] * float(np.asarray(dx).ravel()[0])
+        feat[l] = np.concatenate((dist_m, velo, speed, acc_mag,
+                                  visib[:, np.newaxis]), axis=1)
+    return feat
+
+
+def get_dataset(sessions, dataset_file):
+    x, y, m, i = [], [], [], []
+    for idx, s in enumerate(sessions):
+        list_pos, dx, dy = get_pos(s["position"].strip())
+        time = list_pos['time']
+        n = time.shape[0]
+        mask_holds = get_mask_holds(s["mask"].strip())
+        annot = get_annotation(s["annotation"].strip(), n,
+                               list(mask_holds.keys()), time)
+        for tp in LIMBS:
+            feats = get_features(list_pos, tp, mask_holds, dx, dy)
             for l in mask_holds:
-                dist = mask_holds[l][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis]               
-                x.append(np.concatenate((dist.T,velo.T)).T)
-                y.append(annot[tp][l])   
-                m.append(np.full(n, f"{tp} - Prise {l}")) # np.full pour être de même taille que annot[tp][l] et np.concatenate((dist.T,velo.T)).T
-                i.append(np.full(n,idx))
-    x = np.concatenate(x)
-    y = np.concatenate(y)
+                x.append(feats[l])
+                y.append(annot[tp][l])
+                m.append(np.full(n, f"{tp} - Prise {l}"))
+                i.append(np.full(n, idx))
+
+    x = np.concatenate(x).astype(np.float32)
+    y = np.concatenate(y).astype(np.float32)
     m = np.concatenate(m)
     i = np.concatenate(i)
-    os.makedirs(os.path.dirname(dataset_file), exist_ok=True)
+
+    mean = x.mean(axis=0)
+    std = x.std(axis=0)
+    std[std < 1e-8] = 1.0
+
+    os.makedirs(os.path.dirname(dataset_file) or ".", exist_ok=True)
     with open(dataset_file, 'wb') as handle:
-        pickle.dump({'x':x,'y':y,'m': m, 'i' : i}, handle)
+        pickle.dump({'x': x, 'y': y, 'm': m, 'i': i,
+                     'mean': mean, 'std': std}, handle)
     return
-   
+
+
+# ============================================================
+# Network — z-scoring inside the module
+# ============================================================
 class u_neural(nn.Module):
-    def __init__(self,X,Y,layers):
+    def __init__(self, X=None, Y=None, layers=(64, 16), n_features=6):
         super().__init__()
-        self.X = X
-        self.Y = Y
-        mod = []
-        if X is None:
-            mod.append(nn.Linear(3,layers[0]))
+        self.X, self.Y = X, Y
+        n_in = X.shape[1] if X is not None else n_features
+        if X is not None:
+            mean = X.mean(dim=0)
+            std = X.std(dim=0)
+            std[std < 1e-8] = 1.0
         else:
-            mod.append(nn.Linear(X.shape[1],layers[0]))
-        mod.append(nn.Tanh())
-        for i in range(len(layers)-1):
-            mod.append(nn.Linear(layers[i],layers[i+1]))
-            mod.append(nn.Tanh())
-        mod.append(nn.Linear(layers[-1],1))
-        mod.append(nn.Sigmoid())
+            mean, std = torch.zeros(n_in), torch.ones(n_in)
+        self.register_buffer("mean", mean)
+        self.register_buffer("std", std)
+
+        mod = [nn.Linear(n_in, layers[0]), nn.ReLU()]
+        for k in range(len(layers) - 1):
+            mod += [nn.Linear(layers[k], layers[k + 1]), nn.ReLU()]
+        mod += [nn.Linear(layers[-1], 1)]
         self.net = nn.Sequential(*mod)
-        return
-    
+
     def forward(self, x):
-        return self.net(x)
+        return self.net((x - self.mean) / self.std)
 
-    def loss(self):
-        return torch.nn.functional.binary_cross_entropy(self(self.X),self.Y)
-        return torch.nn.functional.mse_loss(self(self.X),self.Y)
-    
-    def f1_loss(self):
-        y_true = self.Y
-        y_pred = self(self.X)
-        tp = (y_true * y_pred).sum().to(torch.float32)
-        tn = ((1 - y_true) * (1 - y_pred)).sum().to(torch.float32)
-        fp = ((1 - y_true) * y_pred).sum().to(torch.float32)
-        fn = (y_true * (1 - y_pred)).sum().to(torch.float32)
+    def proba(self, x):
+        return torch.sigmoid(self.forward(x))
 
-        epsilon = 1e-7
+    def loss(self, pos_weight=1.0):
+        logits = self(self.X)
+        pw = torch.tensor(pos_weight, dtype=torch.float32, device=logits.device)
+        return nn.functional.binary_cross_entropy_with_logits(
+            logits, self.Y, pos_weight=pw)
 
-        precision = tp / (tp + fp + epsilon)
-        recall = tp / (tp + fn + epsilon)
 
-        f1 = 2* (precision*recall) / (precision + recall + epsilon)
-        return -f1
+def remove_short_sequences(x, min_len=MIN_LEN_FRAMES):
+    """Remove 1-valued runs shorter than min_len frames."""
+    if len(x) == 0:
+        return x
+    x = np.asarray(x).copy()
+    diff = np.diff(np.concatenate(([0], x, [0])))
+    on = np.where(diff == 1)[0]
+    off = np.where(diff == -1)[0]
+    for a, b in zip(on, off):
+        if (b - a) < min_len:
+            x[a:b] = 0
+    return x
 
-def get_f1_score(u_net,list_file_pos,list_file_annotation,list_folder_holds):
-    list_pos = {}
-    for f in list_file_pos:
-        list_pos[f.split("/")[-2]] = get_pos(f)
-    f1 = []
-    for i,i0 in enumerate(list_pos):
-        a = []
-        d = []
-        annotation_file = list_file_annotation[i]
-        mask_holds = get_mask_holds(list_folder_holds[i])
-        n = list_pos[i0]["RH"].shape[0]
-        time = list_pos[i0]["time"]
-        annotation = get_annotation(annotation_file,n,mask_holds,time)
-        detection = get_detection(list_pos[i0],mask_holds,u_net)
-        for l in annotation:
-            for h in mask_holds:
-                a.append(annotation[l][h])
 
-                d.append(detection[l][h][:,0])
-        f1.append(f1_score(np.concatenate(a),np.concatenate(d)))
+def hysteresis(proba, on_thr=ON_THR, off_thr=OFF_THR):
+    """Binarize a probability signal with hysteresis."""
+    out = np.zeros(len(proba), dtype=int)
+    state = 0
+    for t, p in enumerate(proba):
+        if state == 0 and p > on_thr:
+            state = 1
+        elif state == 1 and p < off_thr:
+            state = 0
+        out[t] = state
+    return out
 
-    return np.mean(f1)
 
-def get_f1_score2(u_net_file, dataset_file):
-    u_net = torch.jit.load(u_net_file, map_location=device)
-    u_net.eval()
-    with open(dataset_file,'rb') as o:
-        dataset = pickle.load(o)
-    X = torch.tensor(dataset["x"]).float()
-    Y = torch.tensor(dataset["y"][:,None]).float()
-    Y = Y*(Y>0) #Just in case the script to read the annotation gives negative values
-    y_pred = (u_net(X)>0.5).to(torch.float32)
-    y_true = Y
-    tp = (y_true * y_pred).sum().to(torch.float32)
-    tn = ((1 - y_true) * (1 - y_pred)).sum().to(torch.float32)
-    fp = ((1 - y_true) * y_pred).sum().to(torch.float32)
-    fn = (y_true * (1 - y_pred)).sum().to(torch.float32)
+def _postprocess_series(proba, dist, on_thr, off_thr, max_dist_m,
+                        min_len=MIN_LEN_FRAMES):
+    """Hysteresis -> distance gate -> short-run removal (one series)."""
+    state = hysteresis(proba, on_thr, off_thr)
+    state[dist > max_dist_m] = 0
+    return remove_short_sequences(state, min_len)
 
-    epsilon = 1e-7
 
-    precision = tp / (tp + fp + epsilon)
-    recall = tp / (tp + fn + epsilon)
+def _metrics(y_true, y_pred):
+    y_true = np.clip(np.asarray(y_true, dtype=float), 0, 1)
+    y_pred = np.clip(np.asarray(y_pred, dtype=float), 0, 1)
+    tp = float((y_true * y_pred).sum())
+    fp = float(((1 - y_true) * y_pred).sum())
+    fn = float((y_true * (1 - y_pred)).sum())
+    eps = 1e-7
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = 2 * precision * recall / (precision + recall + eps)
+    return f1, precision, recall
 
-    f1 = 2* (precision*recall) / (precision + recall + epsilon)
-    return f1.detach().numpy().tolist()
-    
 
-def train_NN(dataset_file, network_file, layers=[64,16],display=True,epochs=4500):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _block_split(Y_all, m, val_fraction=VAL_FRACTION):
+    """Hold out the last block of each series (random splits leak)."""
+    train_idx, val_idx = [], []
+    for series in np.unique(m):
+        s_idx = np.where(m == series)[0]
+        cut = int(len(s_idx) * (1 - val_fraction))
+        train_idx.append(s_idx[:cut])
+        val_idx.append(s_idx[cut:])
+    return np.concatenate(train_idx), np.concatenate(val_idx)
 
-    with open(dataset_file,'rb') as o:
-        dataset = pickle.load(o)
-    
-    # sous-échantillonnage + retrait des -1
-    pos_idx = np.where(dataset["y"] == 1)[0]
-    zero_idx = np.where(dataset["y"] == 0)[0]
-    zero_idx_sampled = np.random.choice(zero_idx, size=len(pos_idx)*10, replace=False)
-    idx = np.concatenate([pos_idx, zero_idx_sampled])
-    np.random.shuffle(idx)
-    
-    X = torch.tensor(dataset["x"][idx]).float().to(device)
-    Y = torch.tensor(dataset["y"][idx, None]).float().to(device)
 
-    u_net = u_neural(X,Y,layers).to(device)
-    list_loss = []
-    optimizer = torch.optim.Adam(u_net.parameters(), lr=1e-4)
-    bar_train = st.progress(0., text="Training progress")
-    
-    for epoch in range(epochs):
-        bar_train.progress(epoch/epochs, text="Training progress")
+# ============================================================
+# Training (with threshold tuning on the held-out block)
+# ============================================================
+def _train_model(X_train, Y_train, layers, epochs, device):
+    model = u_neural(X_train, Y_train, layers).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    n_pos = Y_train.sum().clamp(min=1)
+    n_neg = (1 - Y_train).sum()
+    pw = float((n_neg / n_pos).clamp(1, 50).item())
+    for _ in range(epochs):
         optimizer.zero_grad()
-        loss = u_net.f1_loss()
-        list_loss.append(loss.item())
-        loss.backward()
+        model.loss(pos_weight=pw).backward()
         optimizer.step()
+    model.eval()
+    return model
 
-    if display:
-        fig = plt.figure()
-        plt.plot([-l for l in list_loss])
-        plt.xlabel("Iterations")
-        plt.ylabel("F1-score")
-        plt.grid()
-        #st.pyplot(fig)
-    else:
-        fig = None
-    os.makedirs(os.path.dirname(network_file), exist_ok=True)
-    model_scripted = torch.jit.script(u_net) # Export to TorchScript
-    model_scripted.save(network_file) # Save
-    return list_loss, fig
 
-def train_kfold_NN(dataset_file, layers=[64,16], epochs=4000):
+def _tune_thresholds(model, X_val, Y_val, m_val, device):
+    """Grid search (on_thr, off_thr, max_dist) maximizing F1 on the
+    held-out block. Features are RAW (the model z-scores internally)."""
+    with torch.no_grad():
+        p = model.proba(torch.tensor(X_val, dtype=torch.float32,
+                                     device=device)).cpu().numpy().flatten()
+    dist = X_val[:, 0]
+    best = None
+    for on_thr in [0.5, 0.6, 0.7, 0.8, 0.9]:
+        for off_thr in [0.2, 0.3, 0.4, 0.5]:
+            if off_thr >= on_thr:
+                continue
+            for max_dist in [0.05, 0.10, 0.15, 0.25]:
+                y_pred = np.zeros_like(Y_val)
+                for series in np.unique(m_val):
+                    sel = np.where(m_val == series)[0]
+                    y_pred[sel] = _postprocess_series(
+                        p[sel], dist[sel], on_thr, off_thr, max_dist)
+                f1, precision, recall = _metrics(Y_val, y_pred)
+                if best is None or f1 > best["f1"]:
+                    best = {"f1": f1, "precision": precision,
+                            "recall": recall, "on_thr": on_thr,
+                            "off_thr": off_thr, "max_dist_m": max_dist}
+    return best
+
+
+def train_NN(dataset_file, network_file, layers=(64, 16), display=True,
+             epochs=EPOCHS_DEFAULT, tune=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     with open(dataset_file, 'rb') as o:
         dataset = pickle.load(o)
-    
-    X = dataset["x"]
-    Y = dataset["y"]
-    I = dataset["i"]
 
-    logo = LeaveOneGroupOut()
-    scores_f1 = []
+    X_all, Y_all, m_all = dataset["x"], dataset["y"], dataset["m"]
 
-    for fold, (train_idx, val_idx) in enumerate(logo.split(X, Y, I)):
-        vid = np.unique(I[val_idx])
-        print(f"fold : {fold + 1}\n")
+    if tune:
+        train_idx, val_idx = _block_split(Y_all, m_all)
+    else:
+        train_idx = np.arange(len(Y_all))
+        val_idx = np.array([], dtype=int)
 
-        X_train = X[train_idx]
-        Y_train = Y[train_idx]
-        X_val = torch.tensor(X[val_idx]).float().to(device)
-        Y_val = torch.tensor(Y[val_idx]).float().to(device)
-        
-        pos_idx = np.where(Y_train == 1)[0]
-        zero_idx = np.where(Y_train == 0)[0]
-        zero_idx_sampled = np.random.choice(zero_idx, size=len(pos_idx)*10, replace=False)
-        idx_sub = np.concatenate([pos_idx, zero_idx_sampled])
-        np.random.shuffle(idx_sub)
-        
-        X_train = torch.tensor(X_train[idx_sub]).float().to(device)
-        Y_train = torch.tensor(Y_train[idx_sub, None]).float().to(device)
-        
-        u_net = u_neural(X_train, Y_train, layers).to(device)
-        optimizer = torch.optim.Adam(u_net.parameters(), lr=1e-4)
+    # subsample negatives on the training part only
+    Y_tr = Y_all[train_idx]
+    pos_idx = train_idx[np.where(Y_tr == 1)[0]]
+    zero_idx = train_idx[np.where(Y_tr == 0)[0]]
+    n_zero = min(len(zero_idx), len(pos_idx) * NEG_POS_RATIO)
+    idx = np.concatenate([pos_idx, np.random.choice(zero_idx, size=n_zero,
+                                                    replace=False)])
+    np.random.shuffle(idx)
+    X_train = torch.tensor(X_all[idx], dtype=torch.float32, device=device)
+    Y_train = torch.tensor(Y_all[idx, None], dtype=torch.float32, device=device)
 
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            loss = u_net.f1_loss()
-            loss.backward()
-            optimizer.step()
+    model = _train_model(X_train, Y_train, layers, epochs, device)
 
-        u_net.eval()
-        
-        with torch.no_grad():
-            Y_pred_val = u_net(X_val)
-            
-            Y_pred_binary = (Y_pred_val.cpu().numpy() > 0.5).astype(int).flatten()
-            Y_true_binary = Y_val.cpu().numpy().flatten()
-            
-            Y_pred_clean = remove_short_sequences(Y_pred_binary, 20)
-            
-            y_true = Y_true_binary * (Y_true_binary > 0)
-            y_pred = Y_pred_clean * (Y_pred_clean > 0)
+    if tune and len(val_idx) > 0:
+        best = _tune_thresholds(model, X_all[val_idx], Y_all[val_idx],
+                                 m_all[val_idx], device)
+        try:
+            st.info(f"Tuned on validation: ON>{best['on_thr']}, "
+                    f"OFF<{best['off_thr']}, gate {best['max_dist_m']}m "
+                    f"→ F1 {best['f1']:.2f}")
+        except Exception:
+            pass
+    else:
+        best = {"on_thr": ON_THR, "off_thr": OFF_THR, "max_dist_m": MAX_DIST_M}
 
-            tp = (y_true * y_pred).sum()
-            tn = ((1 - y_true) * (1 - y_pred)).sum()
-            fp = ((1 - y_true) * y_pred).sum()
-            fn = (y_true * (1 - y_pred)).sum()
-            
-            epsilon = 1e-7
-            precision = tp / (tp + fp + epsilon)
-            recall = tp / (tp + fn + epsilon)
-            
-            fold_f1 = 2 * (precision * recall) / (precision + recall + epsilon)
-            
-            scores_f1.append(fold_f1)
-        print(f"Fold {fold + 1} terminé. F1-Score : {fold_f1:.4f}")
+    # honest report on the full dataset, natural class balance
+    with torch.no_grad():
+        p_all = model.proba(torch.tensor(X_all, dtype=torch.float32,
+                                         device=device)).cpu().numpy().flatten()
+    y_pred = np.zeros_like(Y_all)
+    for series in np.unique(m_all):
+        sel = np.where(m_all == series)[0]
+        y_pred[sel] = _postprocess_series(p_all[sel], X_all[sel, 0],
+                                          best["on_thr"], best["off_thr"],
+                                          best["max_dist_m"])
+    f1, precision, recall = _metrics(Y_all, y_pred)
 
-    print(f"Scores par fold : {scores_f1}")
-    print(f"Score F1 Moyen  : {np.mean(scores_f1):.4f}")
-        
-    return scores_f1
+    fig = None
+    if display:
+        fig = plt.figure()
+        plt.bar(["F1", "Precision", "Recall"], [f1, precision, recall])
+        plt.ylim(0, 1)
+        plt.grid(axis="y")
+        try:
+            st.pyplot(fig)
+        except Exception:
+            pass
+
+    os.makedirs(os.path.dirname(network_file) or ".", exist_ok=True)
+    torch.jit.script(model).save(network_file)
+    params_file = os.path.splitext(network_file)[0] + "_params.json"
+    with open(params_file, 'w') as f:
+        json.dump({"on_thr": best["on_thr"], "off_thr": best["off_thr"],
+                   "max_dist_m": best["max_dist_m"],
+                   "min_len_frames": MIN_LEN_FRAMES}, f, indent=2)
+    return [f1, precision, recall], fig
+
+# ============================================================
+# Inference
+# ============================================================
+def get_detection_one(list_pos, mask_holds, u_net, dx, dy, device=None,
+                      on_thr=ON_THR, off_thr=OFF_THR, max_dist_m=MAX_DIST_M):
+    """Detection for one session: {limb: {hold: binary array}}.
+    Hysteresis + distance gate per (limb, hold), then winner-take-all
+    (a limb can be on only one hold)."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    n = list_pos['time'].shape[0]
+    y0 = {}
+    for tp in LIMBS:
+        feats = get_features(list_pos, tp, mask_holds, dx, dy)
+        proba = np.zeros((n, len(mask_holds)))
+        for en, l in enumerate(mask_holds):
+            X = torch.tensor(feats[l], dtype=torch.float32, device=device)
+            with torch.no_grad():
+                proba[:, en] = torch.sigmoid(u_net(X)).cpu().numpy().flatten()
+        states = np.zeros_like(proba)
+        for en in range(len(mask_holds)):
+            s = hysteresis(proba[:, en], on_thr, off_thr)
+            s[feats[list(mask_holds.keys())[en]][:, 0] > max_dist_m] = 0
+            states[:, en] = s
+        for t in range(n):  # winner-take-all among active holds
+            on_cols = np.where(states[t] > 0)[0]
+            if len(on_cols) > 1:
+                best = on_cols[np.argmax(proba[t, on_cols])]
+                states[t, on_cols] = 0
+                states[t, best] = 1
+        y0[tp] = {}
+        for en, l in enumerate(mask_holds):
+            y0[tp][l] = remove_short_sequences(states[:, en].astype(int))
+    return y0
+
 
 def get_detection(sessions, dataset_out, u_net_file):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x = []
-    y = []
-    y_score_pred = []
-    y_score_true = []
+    x, y, y_score_true, y_score_pred = [], [], [], []
+    color = {'LH': 'red', 'RH': 'orange', 'LF': 'blue', 'RF': 'purple'}
 
-    color = {'LH':'red','RH':'orange','LF':'blue','RF':'purple'}
     u_net = torch.jit.load(u_net_file, map_location=device)
     u_net.eval()
-    bar_inference = st.progress(0., text="Inference progress")
-    for i,s in enumerate(sessions):
-        bar_inference.progress(i/len(sessions), text="Inference progress")
-        # Perform inference
-        p = s["position"]
-        det = s["prediction"]        
-        h = s["mask"]
-        list_pos, dx, dy = get_pos(p.strip())
-        time = list_pos["time"]
-        dt = np.median(np.diff(time))
-        mask_holds = get_mask_holds(h.strip())
-        n = time.shape[0]
-        y0 = {}
-        y0['time'] = time
-        # If a plot is required
-        if "plot" in s:
-            fig = s["plot"]
-        else:
-            fig = None
-        # If annotation is available
-        if "annotation" in s:
-            annot = get_annotation(s["annotation"].strip(),n, mask_holds, time)
-            y_true = []
-            y_pred = []
-        else:
-            annot = None
+    tuned = {"on_thr": ON_THR, "off_thr": OFF_THR, "max_dist_m": MAX_DIST_M}
+    params_file = os.path.splitext(u_net_file)[0] + "_params.json"
+    if os.path.isfile(params_file):
+        with open(params_file) as f:
+            tuned.update(json.load(f))
 
+    bar = st.progress(0., text="Inference progress")
+    annot = None
+    for i, s in enumerate(sessions):
+        bar.progress(i / len(sessions), text="Inference progress")
+        list_pos, dx, dy = get_pos(s["position"].strip())
+        time = list_pos['time']
+        mask_holds = get_mask_holds(s["mask"].strip())
+        n = time.shape[0]
+
+        fig = s.get("plot", None)
+        if "annotation" in s:
+            annot = get_annotation(s["annotation"].strip(), n,
+                                   list(mask_holds.keys()), time)
         if fig is not None:
-            plt.figure(figsize=(10,len(mask_holds)))
+            plt.figure(figsize=(10, max(len(mask_holds), 1)))
             plt.tight_layout()
 
-        detection_out = {"Time":time}
-        for tp in ["RH","LH","RF","LF"]:
+        detection_out = {"Time": time}
+        y0 = get_detection_one(list_pos, mask_holds, u_net, dx, dy, device,
+                               tuned["on_thr"], tuned["off_thr"],
+                               tuned["max_dist_m"])
+        for tp in LIMBS:
+            feats = get_features(list_pos, tp, mask_holds, dx, dy)
             detection_out[tp] = {}
-            p = list_pos[tp]     
-            p[:,0] = p[:,0]*dx
-            p[:,1] = p[:,1]*dy
-            velo = np.diff(p,axis=0)/dt
-            velo = np.concatenate((velo[0:1,:],velo))
-            acc = np.diff(velo,axis=0)/dt
-            acc = np.concatenate((acc[0:1,:],acc))
-            y0[tp] = {}
-
-            # bloc pour empecher d'avoir un membre sur 2 prises en même temps 
-            proba = np.zeros((n, len(mask_holds)))
-            temp = {} 
-            
             for en, l in enumerate(mask_holds):
-                dist = mask_holds[l][(p[:,1]/dy).astype(int),(p[:,0]/dx).astype(int)][:,np.newaxis]
-                X = torch.tensor(np.concatenate((dist.T,velo.T)).T).float().to(device)
-                Yout = u_net(X)
-                proba[:, en] = Yout.detach().cpu().numpy().flatten()
-                temp[l] = np.concatenate((dist.T,velo.T)).T
-            
-            best_i = np.argmax(proba, axis=1)
-            max_proba = np.max(proba, axis=1)
-            best_matrice = np.zeros_like(proba)
-
-            for t in range(n):
-                if max_proba[t] > 0.5:
-                    best_matrice[t, best_i[t]] = 1
-
-            for en, l in enumerate(mask_holds):
-                y0[tp][l] = remove_short_sequences(best_matrice[:, en].astype(int), 20)
-                x.append(temp[l])
-                y.append(y0[tp][l].flatten())
-                detection_out[tp][l] = y0[tp][l].flatten().copy()
-                
+                y_det = y0[tp][l].flatten()
+                x.append(feats[l])
+                y.append(y_det)
+                detection_out[tp][l] = y_det.copy()
                 if fig is not None:
-                    plt.subplot(len(mask_holds),1,en+1)
-                    plt.plot(time,y0[tp][l], c=color[tp], linestyle='solid', label=tp)
+                    plt.subplot(len(mask_holds), 1, en + 1)
+                    plt.plot(time, y_det, c=color[tp], ls='solid', label=tp)
                     if annot is not None:
-                        plt.plot(time,annot[tp][l], c=color[tp], linestyle='dotted')
-                    plt.ylim(0,1.1)
-                    plt.ylabel("Hold:"+str(l))
+                        plt.plot(time, annot[tp][l], c=color[tp], ls='dotted')
+                    plt.ylim(0, 1.1)
+                    plt.ylabel("Hold:" + str(l))
                 if annot is not None:
-                    y_true.append(annot[tp][l].flatten())
-                    y_pred.append(y0[tp][l].flatten())
                     y_score_true.append(annot[tp][l].flatten())
-                    y_score_pred.append(y0[tp][l].flatten())
+                    y_score_pred.append(y_det)
 
-        
         if fig is not None:
-            plt.subplot(len(mask_holds),1,1)
-            plt.legend()
-            # If there is annotation, compute the F1-score
             if annot is not None:
-                y_true = np.concatenate(y_true)
-                y_pred = np.concatenate(y_pred)
-
-                y_true = y_true * (y_true>0) # Mainly in case of an annotation issue
-                y_pred = y_pred * (y_pred>0)
-                
-                tp = (y_true * y_pred).sum()
-                tn = ((1 - y_true) * (1 - y_pred)).sum()
-                fp = ((1 - y_true) * y_pred).sum()
-                fn = (y_true * (1 - y_pred)).sum()
-                epsilon = 1e-7
-                precision = tp / (tp + fp + epsilon)
-                recall = tp / (tp + fn + epsilon)
-                f1 = 2* (precision*recall) / (precision + recall + epsilon)
-                plt.title(f"Final F1-score: {f1:.2f}")
-            plt.subplot(len(mask_holds),1,len(mask_holds))
-            plt.xlabel("Time (s)")
-
-            os.makedirs(os.path.dirname(fig), exist_ok=True)
+                yt = np.clip(np.concatenate(y_score_true), 0, 1)
+                yp = np.concatenate(y_score_pred)
+                f1, precision, recall = _metrics(yt, yp)
+                plt.title(f"F1: {f1:.2f}  P: {precision:.2f}  R: {recall:.2f}")
+            os.makedirs(os.path.dirname(fig) or ".", exist_ok=True)
             plt.savefig(fig)
-            # Here, just to plot the aligned sequence, just used for debugging
-#            plt.figure()
-#            plt.plot(y_true)
-#            plt.plot(y_pred)
-#            plt.savefig(fig.replace('.png','_.png'))
 
+        pred_path = s.get("prediction", None)
+        if pred_path:
+            pred_path = pred_path.strip()
+            os.makedirs(os.path.dirname(pred_path) or ".", exist_ok=True)
+            with open(pred_path, 'wb') as handle:
+                pickle.dump(detection_out, handle)
 
-    bar_inference.progress(1., text="Inference progress")
+    bar.progress(1., text="Inference progress")
 
     x = np.concatenate(x)
     y = np.concatenate(y)
-
-    os.makedirs(os.path.dirname(dataset_out), exist_ok=True)
+    os.makedirs(os.path.dirname(dataset_out) or ".", exist_ok=True)
     with open(dataset_out, 'wb') as handle:
-        pickle.dump({'x':x,'y':y}, handle)
-    with open(det, 'wb') as handle:
-        pickle.dump(detection_out, handle)
+        pickle.dump({'x': x, 'y': y}, handle)
 
     if annot is None:
         return 1
-    y_true = np.concatenate(y_score_true)
+    y_true = np.clip(np.concatenate(y_score_true), 0, 1)
     y_pred = np.concatenate(y_score_pred)
-
-    y_true = y_true * (y_true>0) # Mainly in case of an annotation issue
-    y_pred = y_pred * (y_pred>0)
-                
-    
-    tp = (y_true * y_pred).sum()
-    tn = ((1 - y_true) * (1 - y_pred)).sum()
-    fp = ((1 - y_true) * y_pred).sum()
-    fn = (y_true * (1 - y_pred)).sum()
-    epsilon = 1e-7
-    precision = tp / (tp + fp + epsilon)
-    recall = tp / (tp + fn + epsilon)
-    f1 = 2* (precision*recall) / (precision + recall + epsilon)
-    
+    f1, precision, recall = _metrics(y_true, y_pred)
+    try:
+        st.success(f"F1: {f1:.2f}  Precision: {precision:.2f}  "
+                   f"Recall: {recall:.2f}")
+    except Exception:
+        pass
     return f1
-
-
-def detect_low_values(signal, low_threshold, high_threshold):
-    """
-    Detect low values with hysteresis in a 1D signal.
-    
-    Args:
-    - signal: The input 1D numpy array.
-    - low_threshold: The lower threshold value.
-    - high_threshold: The higher threshold value.
-    
-    Returns:
-    - A binary array where values less than the low_threshold are set to 1,
-      values between low_threshold and high_threshold are set to 0 or 1 based on
-      connectivity, and values greater than the high_threshold are set to 0.
-    """
-    # Initialize output array
-    output = np.zeros_like(signal, dtype=np.int8)
-    
-    # Apply low threshold
-    output[signal < low_threshold] = 1
-    
-    # Find indices of values between low and high thresholds
-    between_indices = np.where((signal >= low_threshold) & (signal <= high_threshold))[0]
-    
-    # Perform hysteresis thresholding
-    for index in between_indices:
-        if np.any(output[max(0, index-1):min(len(signal), index+2)]):
-            output[index] = 1
-    
-    return output
-
-def remove_short_true_sequences(boolean_array, min_sequence_length):
-    """
-    Remove short sequences of True values from a 1D array of booleans.
-
-    Args:
-    - boolean_array: 1D NumPy array of boolean values.
-    - min_sequence_length: Minimum length of the True sequence to be kept.
-
-    Returns:
-    - A new 1D array with short True sequences removed.
-    """
-    result = boolean_array.copy()
-    in_sequence = 0
-    start_index = 0
-
-    for i, value in enumerate(boolean_array):
-        if value:
-            if not in_sequence:
-                start_index = i
-                in_sequence = 1
-        elif in_sequence:
-            sequence_length = i - start_index
-            if sequence_length < min_sequence_length:
-                result[start_index:i] = 0
-            in_sequence = 0
-
-    # Check if the last sequence extends to the end of the array
-    if in_sequence:
-        sequence_length = len(boolean_array) - start_index
-        if sequence_length < min_sequence_length:
-            result[start_index:] = 0
-
-    return result
-
-def remove_short_sequences(arr,min_length):
-    return 1-remove_short_true_sequences(1-remove_short_true_sequences(arr,min_length),min_length)
-        
-def realize_detection(tresh_reach0,tresh_leave0,minimal_time0,lambda_velocity):
-    global list_holds, pos_RH,pos_LH,pos_RF,pos_LF
-    detection = {"RH":{},"LH":{},"RF":{},"LF":{}}
-    for l in list_holds:
-        for p,tp in zip([pos_RH,pos_LH,pos_RF,pos_LF],["RH","LH","RF","LF"]):
-            dist = np.linalg.norm(p-np.ones((p.shape[0],2))*np.array(l[1:]),axis=1)
-            d = detect_low_values(dist,tresh_reach0,tresh_leave0)
-            detection[tp][l] = 1-remove_short_true_sequences(1-remove_short_true_sequences(d,minimal_time0),minimal_time0)
-    return detection

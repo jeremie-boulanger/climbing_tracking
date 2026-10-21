@@ -1,0 +1,13 @@
+{
+    "sessions": [
+        {
+            "position": "./data/tracking/CL_B1E4_tracking.pickle",
+            "mask": "./data/holds/B1_aligned_E1E3",
+            "annotation": "./data/annotation/CL_B1E4.csv",
+            "prediction": "./data/inference/CL_B1E4_heldout.pickle",
+            "plot": "./data/inference/CL_B1E4_heldout.png"
+        }
+    ],
+    "dataset": "./data/dataset_test_E4.pickle",
+    "network": "./data/u_net_E1E3.pt"
+}

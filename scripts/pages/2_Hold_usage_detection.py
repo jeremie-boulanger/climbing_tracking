@@ -18,7 +18,8 @@ defaults = {
     "dataset_train2": "",
     "network_out": "",
     "dataset_test": "",
-    "network_in": ""
+    "network_in": "",
+    "mask_out": ""
 }
 
 for key, value in defaults.items():
@@ -27,9 +28,9 @@ for key, value in defaults.items():
 # --------------------------------------------------
 # Columns Layout
 # --------------------------------------------------
-col_train, col_test, _ = st.columns(3)
-    
-    
+col_train, col_test = st.columns(2)
+
+
 submitted_dataset = False
 submitted_training = False
 submitted_inference = False
@@ -43,10 +44,14 @@ with col_train:
         "sessions":[
             {"position": "./data/tracking/Seq21_tracking.pickle",
             "annotation": "./data/annotation/Seq21_annotation.xlsx",
-            "mask": "./data/holds/"},
+            "mask": "./data/holds/B1_aligned",
+            "wall image": "./data/tracking/tracking/Seq21_wall_image.png",
+            "video": "./data/videos/Seq21.mp4"},
             {"position": "./data/tracking/Seq22_tracking.pickle",
             "annotation": "./data/annotation/Seq22_annotation.xlsx",
-            "mask": "./data/holds/"}
+            "mask": "./data/holds/B1_aligned",
+            "wall image": "./data/tracking/tracking/Seq22_wall_image.png",
+            "video": "./data/videos/Seq22.mp4"}
             ],
         "dataset": "./data/dataset.pickle",
         "network": "./data/u_net.pt"
@@ -54,6 +59,7 @@ with col_train:
 
     # File uploader
     uploaded_file_train = st.file_uploader("Upload a JSON file for the training fields", type=["json"])
+
 
     if uploaded_file_train:
         try:
@@ -67,7 +73,27 @@ with col_train:
             st.error(f"Error reading file: {e}")
 
 
-
+    st.subheader("Rebuild hold masks from the annotations")
+    st.caption("Hand-drawn masks can be misaligned with the video frames "
+               "(drawn on another view or a resized image). This rebuilds "
+               "each mask at the true hold position, measured from the "
+               "tracked limb positions during the annotated contacts.")
+    with st.form("align_masks"):
+        mask_out = st.text_input("Aligned masks (OUT) folder:", key="mask_out")
+        submitted_align = st.form_submit_button(
+            "Rebuild masks at the true hold positions")
+    if submitted_align:
+        if not st.session_state.sessions_train:
+            st.warning("No training sessions loaded — upload a sessions JSON first.")
+        elif not mask_out:
+            st.warning("Enter an output folder for the aligned masks.")
+        else:
+            with st.spinner("Rebuilding masks from annotated contacts..."):
+                info = build_aligned_masks(st.session_state.sessions_train,
+                                           mask_out.strip())
+            st.success(f"{len(info)} masks written to {mask_out}. Point the "
+                       f"'mask' field of your sessions at this folder "
+                       f"before generating the dataset.")
 
     st.subheader("Generate a dataset to train")
     placeholder_generating_dataset = st.empty()
@@ -76,6 +102,7 @@ with col_train:
         with st.form("generate dataset"):
             dataset_train = st.text_input("Enter dataset (OUT) path:", key="dataset_train")
             submitted_dataset = st.form_submit_button("Generate training dataset from sessions.")
+
 
     if submitted_dataset:
         with st.spinner("Generating dataset..."):
@@ -91,11 +118,21 @@ with col_train:
             network_out = st.text_input("Enter network (OUT) path", key="network_out")
             submitted_training = st.form_submit_button("Train from generated dataset")
 
+
     fig = None
     if submitted_training and os.path.isfile(st.session_state.dataset_train2):
         with st.spinner("Training the network..."):
             loss, fig = train_NN(dataset_train2, network_out)
-            st.success(f"Training complete, final F1-score: {-loss[-1]:.2f}.")
+            # train_NN returns [f1, precision, recall] (computed with the
+            # tuned thresholds on the full dataset)
+            f1, precision, recall = loss
+            st.success(f"Training complete. F1: {f1:.2f}  "
+                       f"Precision: {precision:.2f}  Recall: {recall:.2f}")
+        # show the tuned operating point, if saved
+        params_file = os.path.splitext(network_out)[0] + "_params.json"
+        if os.path.isfile(params_file):
+            with open(params_file) as f:
+                st.json(json.load(f))
     if submitted_training and not os.path.isfile(st.session_state.dataset_train2):
         st.warning(f"Dataset for training not generated.")
 
@@ -111,13 +148,12 @@ with col_test:
         st.json({
     "sessions":[
         {"position": "./data/tracking/Seq21_tracking.pickle",
-        "annotation": "./data/annotation/Seq21_annotation.xlsx",
-        "mask": "./data/holds/",
+        "mask": "./data/holds/B1_aligned",
         "prediction": "./data/inference/Seq21.pickle",
         "plot": "./data/inference/Seq21.png"},
 
         {"position": "./data/tracking/Seq22_tracking.pickle",
-        "mask": "./data/holds/",
+        "mask": "./data/holds/B1_aligned",
         "prediction": "./data/inference/Seq22.pickle",
         "annotation": "./data/annotation/Seq22_annotation.xlsx",
         "plot": "./data/inference/Seq22.png"}
@@ -149,7 +185,6 @@ with col_test:
             submitted_inference = st.form_submit_button("Perform inference from sessions.")
 
     if submitted_inference:
-#        get_dataset(st.session_state.sessions_test, dataset_test)
         with st.spinner("Performing inference on dataset"):
             f1 = get_detection(st.session_state.sessions_test, dataset_test, network_in)
             st.success(f"Inference and dataset generation complete. Final F1-score is {f1:.2f}")

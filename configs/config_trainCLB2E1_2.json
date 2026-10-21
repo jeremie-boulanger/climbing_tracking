@@ -1,0 +1,28 @@
+{
+    "sessions": [
+        {
+            "position": "./data/tracking/CL_B1E1_tracking.pickle",
+            "annotation": "./data/annotation/CL_B1E1.csv",
+            "mask": "./data/holds/B1_aligned",
+            "wall image": "./data/tracking/tracking/CL_B1E1_wall_image.png",
+            "video": "./data/videos/CL_B1E1_h265_2.mp4"
+        },
+        {
+            "position": "./data/tracking/CL_B1E3_tracking.pickle",
+            "annotation": "./data/annotation/CL_B1E3.csv",
+            "mask": "./data/holds/B1_aligned",
+            "wall image": "./data/tracking/tracking/CL_B1E3_wall_image.png",
+            "video": "./data/videos/CL_B1E3_h265_2.mp4"
+        },
+
+                {
+            "position": "./data/tracking/CL_B1E4_tracking.pickle",
+            "annotation": "./data/annotation/CL_B1E4.csv",
+            "mask": "./data/holds/B1_aligned",
+            "wall image": "./data/tracking/tracking/CL_B1E4_wall_image.png",
+            "video": "./data/videos/CL_B1E4_h265_2.mp4"
+        }
+    ],
+    "dataset": "./data/dataset_tracking.pickle",
+    "network": "./data/u_net.pt"
+}
